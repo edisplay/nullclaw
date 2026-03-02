@@ -1637,10 +1637,53 @@ pub fn cliListRuns(allocator: std.mem.Allocator, id: []const u8) !void {
         log.info("Run history for job {s} ({s}):", .{ id, job.command });
         const status = job.last_status orelse "never run";
         log.info("  Last status: {s}", .{status});
-        log.info("  Next run:    {d}", .{job.next_run_secs});
+        var ts_buf: [64]u8 = undefined;
+        const formatted = formatUnixTimestamp(job.next_run_secs, &ts_buf);
+        log.info("  Next run:    {d} ({s})", .{ job.next_run_secs, formatted });
     } else {
         log.warn("Cron job '{s}' not found", .{id});
     }
+}
+
+/// Format a Unix timestamp (seconds since epoch) into a human-readable string.
+/// Returns: "Mon Mar 02 2026 12:39:00 UTC"
+fn formatUnixTimestamp(secs: i64, buf: []u8) []const u8 {
+    const min_formatted_len = "Thu Jan 01 1970 00:00:00 UTC".len;
+    if (buf.len < min_formatted_len) return "buffer too small";
+    if (secs < 0) return "invalid timestamp";
+
+    const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(secs) };
+    const epoch_day = epoch_secs.getEpochDay();
+    const day_seconds = epoch_secs.getDaySeconds();
+
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+
+    // Jan 1, 1970 was Thursday (day 0 = Thu, day 4 = Mon, etc.)
+    // Formula: (epoch_day.day + 4) % 7 gives us an index into the weekday array
+    const weekday_num = @as(u3, @intCast((epoch_day.day + 4) % 7));
+    const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+    const hour = day_seconds.getHoursIntoDay();
+    const minute = day_seconds.getMinutesIntoHour();
+    const second = day_seconds.getSecondsIntoMinute();
+
+    const month_num = month_day.month.numeric();
+    const month_index = if (month_num > 0 and month_num <= 12) month_num - 1 else 0;
+    const month_name = month_names[month_index];
+
+    const len = std.fmt.bufPrint(buf, "{s} {s} {d:0>2} {d} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{
+        weekday_names[weekday_num],
+        month_name,
+        month_day.day_index + 1,
+        year_day.year,
+        hour,
+        minute,
+        second,
+    }) catch return "format error";
+
+    return buf[0..len.len];
 }
 
 // ── Backwards-compatible type alias ──────────────────────────────────
@@ -1663,6 +1706,40 @@ test "parseDuration days" {
 
 test "parseDuration weeks" {
     try std.testing.expectEqual(@as(i64, 604800), try parseDuration("1w"));
+}
+
+test "formatUnixTimestamp formats known UTC timestamp" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Mon Mar 02 2026 14:00:00 UTC",
+        formatUnixTimestamp(1772460000, &buf),
+    );
+}
+
+test "formatUnixTimestamp formats unix epoch" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Thu Jan 01 1970 00:00:00 UTC",
+        formatUnixTimestamp(0, &buf),
+    );
+}
+
+test "formatUnixTimestamp rejects negative timestamp" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("invalid timestamp", formatUnixTimestamp(-1, &buf));
+}
+
+test "formatUnixTimestamp accepts exact-size buffer" {
+    var buf: [28]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Thu Jan 01 1970 00:00:00 UTC",
+        formatUnixTimestamp(0, &buf),
+    );
+}
+
+test "formatUnixTimestamp rejects undersized buffer" {
+    var buf: [27]u8 = undefined;
+    try std.testing.expectEqualStrings("buffer too small", formatUnixTimestamp(0, &buf));
 }
 
 test "parseDuration seconds" {
