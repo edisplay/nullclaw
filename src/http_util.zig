@@ -422,11 +422,19 @@ pub fn curlGet(allocator: Allocator, url: []const u8, headers: []const []const u
 /// Checks HTTPS_PROXY, HTTP_PROXY, ALL_PROXY in that order.
 /// Returns null if no proxy is set.
 /// Caller owns returned memory.
+fn normalizeProxyEnvValue(allocator: Allocator, val: []const u8) !?[]const u8 {
+    const trimmed = std.mem.trim(u8, val, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
 pub fn getProxyFromEnv(allocator: Allocator) !?[]const u8 {
     const env_vars = [_][]const u8{ "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY" };
     for (env_vars) |var_name| {
         if (std.process.getEnvVarOwned(allocator, var_name)) |val| {
-            return val;
+            const out = try normalizeProxyEnvValue(allocator, val);
+            allocator.free(val);
+            if (out) |proxy| return proxy;
         } else |_| {}
     }
     return null;
@@ -541,4 +549,17 @@ test "curlGet with zero headers compiles and is callable" {
 
 test "curlGetWithResolve compiles and is callable" {
     try std.testing.expect(true);
+}
+
+test "normalizeProxyEnvValue trims surrounding whitespace" {
+    const alloc = std.testing.allocator;
+    const normalized = try normalizeProxyEnvValue(alloc, "  socks5://127.0.0.1:1080 \r\n");
+    defer if (normalized) |v| alloc.free(v);
+    try std.testing.expect(normalized != null);
+    try std.testing.expectEqualStrings("socks5://127.0.0.1:1080", normalized.?);
+}
+
+test "normalizeProxyEnvValue rejects empty values" {
+    const normalized = try normalizeProxyEnvValue(std.testing.allocator, " \t\r\n");
+    try std.testing.expect(normalized == null);
 }

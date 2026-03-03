@@ -1,10 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const DEFAULT_MAX_API_ERROR_CHARS: usize = 200;
-
-// Thread-local storage for runtime configuration
-threadlocal var max_api_error_chars: usize = DEFAULT_MAX_API_ERROR_CHARS;
-threadlocal var initialized: bool = false;
 
 fn readMaxApiErrorCharsFromEnv() usize {
     if (std.process.getEnvVarOwned(std.heap.page_allocator, "NULLCLAW_MAX_ERROR_CHARS")) |env_val| {
@@ -18,11 +15,8 @@ fn readMaxApiErrorCharsFromEnv() usize {
 }
 
 fn getMaxApiErrorChars() usize {
-    if (!initialized) {
-        max_api_error_chars = readMaxApiErrorCharsFromEnv();
-        initialized = true;
-    }
-    return max_api_error_chars;
+    if (builtin.is_test) return DEFAULT_MAX_API_ERROR_CHARS;
+    return readMaxApiErrorCharsFromEnv();
 }
 
 fn isSecretChar(c: u8) bool {

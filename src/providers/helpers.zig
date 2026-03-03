@@ -291,12 +291,12 @@ pub fn curlPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []cons
     defer if (proxy) |p| allocator.free(p);
 
     if (timeout_secs > 0) {
-        var timeout_buf: [16]u8 = undefined;
+        var timeout_buf: [32]u8 = undefined;
         const timeout_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch
-            return http_util.curlPost(allocator, url, body, headers);
+            return http_util.curlPostWithProxy(allocator, url, body, headers, proxy, null);
         return http_util.curlPostWithProxy(allocator, url, body, headers, proxy, timeout_str);
     }
-    return http_util.curlPost(allocator, url, body, headers);
+    return http_util.curlPostWithProxy(allocator, url, body, headers, proxy, null);
 }
 
 /// Extract text content from a provider JSON response.
