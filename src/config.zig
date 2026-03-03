@@ -2620,6 +2620,33 @@ test "parse agents.defaults.model.primary" {
     allocator.free(cfg.default_model.?);
 }
 
+test "parse agents.defaults.model.primary custom provider supports versioned path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{"agents":{"defaults":{"model":{"primary":"custom:https://api.example.com/openai/v2/minimaxai/minimax-m2.1"}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://api.example.com/openai/v2", cfg.default_provider);
+    try std.testing.expectEqualStrings("minimaxai/minimax-m2.1", cfg.default_model.?);
+}
+
+test "parse legacy default_provider with model-only primary preserves model" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{"default_provider":"openai","agents":{"defaults":{"model":{"primary":"gpt-5.2"}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expect(cfg.legacy_default_provider_detected);
+    try std.testing.expectEqualStrings("openai", cfg.default_provider);
+    try std.testing.expectEqualStrings("gpt-5.2", cfg.default_model.?);
+}
+
 // verify that workspace override field (with backslashes) does not
 // crash parsing and the default model is still picked up.
 test "parse with workspace override" {

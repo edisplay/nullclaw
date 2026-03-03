@@ -145,12 +145,36 @@ fn findProviderInfoByCanonical(name: []const u8) ?ProviderInfo {
     return null;
 }
 
+fn hasVersionedApiSegment(url: []const u8) bool {
+    const proto_start = std.mem.indexOf(u8, url, "://") orelse return false;
+    var i: usize = proto_start + 3;
+    while (i + 2 < url.len) : (i += 1) {
+        if (url[i] != '/' or url[i + 1] != 'v') continue;
+        var j = i + 2;
+        var has_digit = false;
+        while (j < url.len and std.ascii.isDigit(url[j])) : (j += 1) {
+            has_digit = true;
+        }
+        if (!has_digit) continue;
+        if (j == url.len or (j < url.len and url[j] == '/')) return true;
+    }
+    return false;
+}
+
+fn isValidCustomProviderUrl(url: []const u8) bool {
+    if (url.len == 0) return false;
+    if (!(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) return false;
+    return hasVersionedApiSegment(url);
+}
+
 /// Resolve a provider name used in quick setup.
 /// Accepts aliases (e.g. "grok" -> "xai") and returns provider metadata.
 /// Supports custom: prefix for OpenAI-compatible endpoints.
 pub fn resolveProviderForQuickSetup(name: []const u8) ?ProviderInfo {
     // Support custom: prefix for OpenAI-compatible providers
     if (std.mem.startsWith(u8, name, "custom:")) {
+        const custom_url = name["custom:".len..];
+        if (!isValidCustomProviderUrl(custom_url)) return null;
         return .{
             .key = name,
             .label = "Custom OpenAI-compatible provider",
@@ -363,7 +387,7 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
     var needs_auth = false;
     var prefix_filter: ?[]const u8 = null;
     defer if (url_to_free) |u| allocator.free(u);
-    
+
     if (std.mem.eql(u8, canonical, "openrouter")) {
         url = "https://openrouter.ai/api/v1/models";
         needs_auth = false; // OpenRouter models endpoint is public
@@ -447,12 +471,12 @@ fn buildModelsUrl(allocator: std.mem.Allocator, base_url: []const u8) ![]const u
     if (std.mem.endsWith(u8, base_url, "/")) {
         url_to_use = base_url[0 .. base_url.len - 1];
     }
-    
+
     // Check if URL already ends with /models (after removing trailing slash)
     if (std.mem.endsWith(u8, url_to_use, "/models")) {
         return try allocator.dupe(u8, base_url);
     }
-    
+
     // Append /models
     return try std.fmt.allocPrint(allocator, "{s}/models", .{url_to_use});
 }
@@ -1410,13 +1434,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         return;
     };
 
-    var selected_provider: ?[]const u8 = null;
-    var selected_provider_label: ?[]const u8 = null;
-
     if (provider_idx < known_providers.len) {
         const provider = known_providers[provider_idx];
-        selected_provider = provider.key;
-        selected_provider_label = provider.label;
         cfg.default_provider = provider.key;
         try out.print("  -> {s}\n\n", .{provider.label});
     } else {
@@ -1434,9 +1453,12 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
             try out.flush();
             return;
         }
-        const custom_provider_key = try std.fmt.allocPrint(allocator, "custom:{s}", .{custom_url});
-        selected_provider = custom_provider_key;
-        selected_provider_label = try std.fmt.allocPrint(allocator, "Custom: {s}", .{custom_url});
+        if (!isValidCustomProviderUrl(custom_url)) {
+            try out.writeAll("\n  Error: endpoint must be http(s) and include a version segment like /v1\n");
+            try out.flush();
+            return;
+        }
+        const custom_provider_key = try std.fmt.allocPrint(cfg.allocator, "custom:{s}", .{custom_url});
         cfg.default_provider = custom_provider_key;
 
         // Add to providers section with base_url
@@ -1444,7 +1466,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         entries[0] = .{ .name = try cfg.allocator.dupe(u8, cfg.default_provider), .base_url = try cfg.allocator.dupe(u8, custom_url) };
         cfg.providers = entries;
 
-        try out.print("  -> {s}\n\n", .{selected_provider_label.?});
+        try out.print("  -> Custom: {s}\n\n", .{custom_url});
     }
 
     // ── Step 2: API key ──
@@ -1462,8 +1484,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         if (cfg.providers.len > 0 and cfg.providers[0].base_url != null) {
             base_url = cfg.providers[0].base_url;
         }
-        entries[0] = .{ 
-            .name = try cfg.allocator.dupe(u8, cfg.default_provider), 
+        entries[0] = .{
+            .name = try cfg.allocator.dupe(u8, cfg.default_provider),
             .api_key = try cfg.allocator.dupe(u8, api_key_input),
             .base_url = base_url,
         };
@@ -1487,12 +1509,12 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     var models_fetched = false;
     var live_models: []const []const u8 = undefined;
     var models_to_use: []const []const u8 = undefined;
-    
+
     const provider_for_fetch = if (std.mem.startsWith(u8, cfg.default_provider, "custom:"))
         cfg.default_provider["custom:".len..]
     else
         cfg.default_provider;
-    
+
     if (fetchModels(allocator, provider_for_fetch, cfg.defaultProviderKey())) |models| {
         models_fetched = true;
         live_models = models;
@@ -2811,6 +2833,17 @@ test "resolveProviderForQuickSetup supports custom: prefix" {
     try std.testing.expectEqualStrings("Custom OpenAI-compatible provider", custom.label);
     try std.testing.expectEqualStrings("gpt-5.2", custom.default_model);
     try std.testing.expectEqualStrings("API_KEY", custom.env_var);
+}
+
+test "resolveProviderForQuickSetup supports custom: versioned endpoint beyond v1" {
+    const custom = resolveProviderForQuickSetup("custom:https://example.com/openai/v2") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("custom:https://example.com/openai/v2", custom.key);
+}
+
+test "resolveProviderForQuickSetup rejects invalid custom endpoint format" {
+    try std.testing.expect(resolveProviderForQuickSetup("custom:") == null);
+    try std.testing.expect(resolveProviderForQuickSetup("custom:https://example.com/api") == null);
+    try std.testing.expect(resolveProviderForQuickSetup("custom:example.com/v1") == null);
 }
 
 test "resolveMemoryBackendForQuickSetup validates enabled, disabled and unknown backends" {

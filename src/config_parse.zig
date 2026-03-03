@@ -21,27 +21,32 @@ pub fn parseStringArray(allocator: std.mem.Allocator, arr: std.json.Array) ![]co
 }
 
 fn splitPrimaryModelRef(primary: []const u8) ?struct { provider: []const u8, model: []const u8 } {
-    // Handle custom: prefix specially (e.g., "custom:https://example.com/v1/model")
+    // Handle custom: prefix specially (e.g., "custom:https://example.com/v2/model")
     if (std.mem.startsWith(u8, primary, "custom:")) {
-        // The format is "custom:<provider_url>/<model>" where <provider_url> may contain multiple slashes
-        // We need to find the slash that separates the provider from the model.
-        // The provider URL typically ends with "/v1", so we look for the pattern "/v1/" or similar.
-        // A heuristic: find the slash that is after "://<host>" and before the model name.
-        
-        // Look for the pattern "://<anything>/v1/" which indicates the end of the provider URL
-        const after_proto = std.mem.indexOf(u8, primary, "://") orelse return null;
-        const proto_end = after_proto + 3;
-        
-        // Look for "/v1/" or similar version indicator
-        const v1_marker = std.mem.indexOf(u8, primary[proto_end..], "/v1/") orelse return null;
-        const v1_pos = proto_end + v1_marker;
-        if (v1_pos + 4 >= primary.len) return null;
-        
-        // The model starts after the version marker
-        const model_start = v1_pos + 4; // skip "/v1/"
+        // The format is "custom:<provider_url>/<model>" where <provider_url> may contain slashes.
+        // To preserve model IDs that may also contain '/', split after a versioned API segment:
+        // "/v1/", "/v2/", etc.
+        const proto_start = std.mem.indexOf(u8, primary, "://") orelse return null;
+        var i: usize = proto_start + 3;
+        var model_start: ?usize = null;
+        while (i + 3 < primary.len) : (i += 1) {
+            if (primary[i] != '/' or primary[i + 1] != 'v') continue;
+            var j = i + 2;
+            var has_digit = false;
+            while (j < primary.len and std.ascii.isDigit(primary[j])) : (j += 1) {
+                has_digit = true;
+            }
+            if (!has_digit) continue;
+            if (j < primary.len and primary[j] == '/') {
+                if (j + 1 >= primary.len) return null;
+                model_start = j + 1;
+                break;
+            }
+        }
+        const split_at = model_start orelse return null;
         return .{
-            .provider = primary[0..model_start - 1], // include the trailing "/" in provider
-            .model = primary[model_start..],
+            .provider = primary[0 .. split_at - 1],
+            .model = primary[split_at..],
         };
     }
 
@@ -394,6 +399,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                         if (!self.legacy_default_provider_detected) {
                                             self.default_provider = try self.allocator.dupe(u8, parsed_ref.provider);
                                         }
+                                    } else if (self.legacy_default_provider_detected) {
+                                        // Legacy top-level default_provider + model-only primary.
+                                        self.default_model = try self.allocator.dupe(u8, v.string);
                                     } else if (!self.legacy_default_provider_detected) {
                                         // Only fail if neither legacy nor new format provides valid data
                                         self.default_provider = "";
