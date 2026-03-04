@@ -49,13 +49,6 @@ pub fn hostMatchesAllowlist(host: []const u8, allowed: []const []const u8) bool 
                 if (prefix_len > 0 and host[prefix_len - 1] == '.') return true;
             }
         }
-        // Also allow implicit subdomain match (like browser_open does)
-        if (host.len > pattern.len) {
-            const offset = host.len - pattern.len;
-            if (std.mem.eql(u8, host[offset..], pattern) and host[offset - 1] == '.') {
-                return true;
-            }
-        }
     }
     return false;
 }
@@ -702,9 +695,9 @@ test "hostMatchesAllowlist empty allowlist allows all" {
     try std.testing.expect(hostMatchesAllowlist("anything.com", empty));
 }
 
-test "hostMatchesAllowlist implicit subdomain match" {
+test "hostMatchesAllowlist exact entry does not implicitly match subdomains" {
     const domains = [_][]const u8{"example.com"};
-    try std.testing.expect(hostMatchesAllowlist("api.example.com", &domains));
+    try std.testing.expect(!hostMatchesAllowlist("api.example.com", &domains));
     try std.testing.expect(!hostMatchesAllowlist("notexample.com", &domains));
 }
 
