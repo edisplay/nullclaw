@@ -11,10 +11,8 @@ const Atomic = @import("../portable_atomic.zig").Atomic;
 const log = std.log.scoped(.telegram);
 const MEDIA_GROUP_FLUSH_SECS: u64 = 3;
 const TEXT_MESSAGE_DEBOUNCE_SECS: u64 = 3;
-// Telegram clients may split long messages below the 4096 hard limit.
-// Keep this threshold high enough to avoid delaying normal messages, while
-// still catching real split chunks observed around ~3.4k.
-const TEXT_SPLIT_LIKELY_MIN_LEN: usize = 2500;
+// Debounce medium+ chunks so rapid-fire split messages get coalesced.
+const TEXT_SPLIT_LIKELY_MIN_LEN: usize = 500;
 const TEMP_MEDIA_SWEEP_INTERVAL_POLLS: u32 = 20;
 const TEMP_MEDIA_TTL_SECS: i64 = 24 * 60 * 60;
 const DRAFT_FLUSH_MIN_DELTA_BYTES: usize = 16;
@@ -2944,7 +2942,7 @@ fn mergeConsecutiveMessages(
 
     var i: usize = 0;
     while (i < messages.items.len) {
-        const mid1 = messages.items[i].message_id orelse {
+        _ = messages.items[i].message_id orelse {
             i += 1;
             continue;
         };
@@ -2959,11 +2957,9 @@ fn mergeConsecutiveMessages(
             if (std.mem.eql(u8, messages.items[i].sender, messages.items[j].sender) and
                 std.mem.eql(u8, messages.items[i].id, messages.items[j].id))
             {
-                if (messages.items[j].message_id) |mid2| {
-                    if (mid2 == mid1 + 1) {
-                        if (!isSlashCommandMessage(messages.items[j].content)) {
-                            found_idx = j;
-                        }
+                if (messages.items[j].message_id) |_| {
+                    if (!isSlashCommandMessage(messages.items[j].content)) {
+                        found_idx = j;
                     }
                 }
                 break; // Found the next message from this user, consecutive or not.
@@ -4285,7 +4281,7 @@ test "telegram shouldDebounceTextMessage catches real-world ~3.4k split chunk" {
     try std.testing.expect(shouldDebounceTextMessage(&ch, msg));
 }
 
-test "telegram shouldDebounceTextMessage does not debounce medium non-split chunk (~900 bytes)" {
+test "telegram shouldDebounceTextMessage debounces medium chunk (~900 bytes)" {
     const alloc = std.testing.allocator;
     var ch = TelegramChannel.init(alloc, "123:ABC", &.{"*"}, &.{}, "allowlist");
     defer {
@@ -4308,10 +4304,10 @@ test "telegram shouldDebounceTextMessage does not debounce medium non-split chun
         .message_id = 101,
     };
 
-    try std.testing.expect(!shouldDebounceTextMessage(&ch, msg));
+    try std.testing.expect(shouldDebounceTextMessage(&ch, msg));
 }
 
-test "telegram mergeConsecutiveMessages non-consecutive ids not merged" {
+test "telegram mergeConsecutiveMessages merges non-consecutive ids for same sender/chat" {
     const alloc = std.testing.allocator;
     var messages: std.ArrayListUnmanaged(root.ChannelMessage) = .empty;
     defer {
@@ -4336,14 +4332,13 @@ test "telegram mergeConsecutiveMessages non-consecutive ids not merged" {
         .content = try alloc.dupe(u8, "Second"),
         .channel = "telegram",
         .timestamp = 0,
-        .message_id = 15, // Gap — not consecutive
+        .message_id = 15, // Gap in ids should still merge for rapid-fire coalescing
     });
 
     mergeConsecutiveMessages(alloc, &messages);
 
-    try std.testing.expectEqual(@as(usize, 2), messages.items.len);
-    try std.testing.expectEqualStrings("First", messages.items[0].content);
-    try std.testing.expectEqualStrings("Second", messages.items[1].content);
+    try std.testing.expectEqual(@as(usize, 1), messages.items.len);
+    try std.testing.expectEqualStrings("First\nSecond", messages.items[0].content);
 }
 
 test "telegram mergeConsecutiveMessages allocation failure does not leak" {
