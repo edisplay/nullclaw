@@ -351,14 +351,20 @@ pub const TeamsChannel = struct {
     fn vtableSend(ptr: *anyopaque, target: []const u8, message: []const u8, _: []const []const u8) anyerror!void {
         const self: *TeamsChannel = @ptrCast(@alignCast(ptr));
 
+        // Strip <nc_choices>...</nc_choices> tags — Teams doesn't render interactive choices.
+        const clean = if (std.mem.indexOf(u8, message, "<nc_choices>")) |tag_start|
+            std.mem.trimRight(u8, message[0..tag_start], &std.ascii.whitespace)
+        else
+            message;
+
         // Target format: "serviceUrl|conversationId" or use stored conversation ref for proactive
         if (std.mem.indexOfScalar(u8, target, '|')) |sep| {
             const service_url = target[0..sep];
             const conversation_id = target[sep + 1 ..];
-            try self.sendMessage(service_url, conversation_id, message);
+            try self.sendMessage(service_url, conversation_id, clean);
         } else if (self.conv_ref_service_url != null and self.conv_ref_conversation_id != null) {
             // Proactive: use stored conversation reference
-            try self.sendMessage(self.conv_ref_service_url.?, self.conv_ref_conversation_id.?, message);
+            try self.sendMessage(self.conv_ref_service_url.?, self.conv_ref_conversation_id.?, clean);
         } else {
             log.warn("Teams send: no conversation reference available for target '{s}'", .{target});
         }
@@ -445,4 +451,22 @@ test "Teams stopTyping is idempotent" {
     };
     try ch.stopTyping("https://smba.trafficmanager.net/teams|19:abc@thread.v2");
     try ch.stopTyping("https://smba.trafficmanager.net/teams|19:abc@thread.v2");
+}
+
+test "vtableSend strips nc_choices tags from message" {
+    const msg = "Pick one:\n- Option A\n- Option B\n<nc_choices>{\"v\":1,\"options\":[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]}</nc_choices>";
+    const clean = if (std.mem.indexOf(u8, msg, "<nc_choices>")) |tag_start|
+        std.mem.trimRight(u8, msg[0..tag_start], &std.ascii.whitespace)
+    else
+        msg;
+    try std.testing.expectEqualStrings("Pick one:\n- Option A\n- Option B", clean);
+}
+
+test "vtableSend preserves message without nc_choices" {
+    const msg = "Hello, how can I help?";
+    const clean = if (std.mem.indexOf(u8, msg, "<nc_choices>")) |tag_start|
+        std.mem.trimRight(u8, msg[0..tag_start], &std.ascii.whitespace)
+    else
+        msg;
+    try std.testing.expectEqualStrings("Hello, how can I help?", clean);
 }
