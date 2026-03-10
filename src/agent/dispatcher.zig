@@ -311,17 +311,20 @@ pub fn parseXmlToolCalls(
     }
 
     // Join text parts
-    const text = if (text_parts.items.len == 0)
+    var text = if (text_parts.items.len == 0)
         try allocator.dupe(u8, "")
     else
         try std.mem.join(allocator, "\n", text_parts.items);
     errdefer allocator.free(text);
 
-    const sanitized_text = try stripToolResultMarkup(allocator, text);
-    allocator.free(text);
+    if (calls.items.len > 0) {
+        const sanitized_text = try stripToolResultMarkup(allocator, text);
+        allocator.free(text);
+        text = sanitized_text;
+    }
 
     return .{
-        .text = sanitized_text,
+        .text = text,
         .calls = try calls.toOwnedSlice(allocator),
     };
 }
@@ -1423,6 +1426,20 @@ test "parseToolCalls strips fabricated tool_result from parsed text" {
     try std.testing.expect(std.mem.indexOf(u8, result.text, "fake result") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.text, "After text.") != null);
     try std.testing.expectEqual(@as(usize, 1), result.calls.len);
+}
+
+test "parseToolCalls preserves literal tool_result text without tool calls" {
+    const allocator = std.testing.allocator;
+    const response = "Example: <tool_result name=\"shell\" status=\"ok\">done</tool_result>";
+
+    const result = try parseToolCalls(allocator, response);
+    defer {
+        allocator.free(result.text);
+        allocator.free(result.calls);
+    }
+
+    try std.testing.expectEqualStrings(response, result.text);
+    try std.testing.expectEqual(@as(usize, 0), result.calls.len);
 }
 
 test "parseToolCalls rejects raw JSON without tags" {
