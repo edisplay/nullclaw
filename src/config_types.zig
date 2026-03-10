@@ -208,7 +208,7 @@ pub const ToolsConfig = struct {
     shell_max_output_bytes: u32 = 1_048_576, // 1MB
     max_file_size_bytes: u32 = 10_485_760, // 10MB — shared file_read/edit/append
     web_fetch_max_chars: u32 = 100_000,
-    /// Environment variables whose values are colon-separated paths.
+    /// Environment variables whose values are platform path-list strings.
     /// Each path component is validated against workspace + allowed_paths
     /// using the same sandbox rules as file access (system blocklist,
     /// realpath canonicalization). Only vars where ALL path components

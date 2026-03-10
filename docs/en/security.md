@@ -76,7 +76,7 @@ By default, only a minimal set of safe environment variables (`PATH`, `HOME`, `T
 
 Some deployments inject tools via volume mounts (e.g., a toolbox init container in Kubernetes). These tools may need environment variables like `LD_LIBRARY_PATH` to find shared libraries, but passing `LD_LIBRARY_PATH` unconditionally is a security risk (library injection).
 
-The `tools.path_env_vars` config allows specifying environment variables whose **values are colon-separated paths**. Each path component is validated against the sandbox before the variable is passed to child processes:
+The `tools.path_env_vars` config allows specifying environment variables whose **values are platform path lists** (`:` on Unix, `;` on Windows). Each path component is validated against the sandbox before the variable is passed to child processes:
 
 1. Every component must be an absolute path
 2. Every component is resolved via `realpath` (canonicalized, symlinks followed)

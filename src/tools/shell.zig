@@ -53,7 +53,7 @@ fn safeEnvVarAllowed(key: []const u8) bool {
     return false;
 }
 
-/// Validate that a colon-separated path value has all components within
+/// Validate that a platform path-list value has all components within
 /// the sandbox (workspace + allowed_paths). Uses the same validation as
 /// file access: system blocklist always rejects, then workspace and
 /// allowed_paths are checked via realpath canonicalization.
@@ -114,7 +114,7 @@ pub const ShellTool = struct {
     timeout_ns: u64 = DEFAULT_SHELL_TIMEOUT_NS,
     max_output_bytes: usize = DEFAULT_MAX_OUTPUT_BYTES,
     policy: ?*const SecurityPolicy = null,
-    /// Env var names whose colon-separated path values are validated
+    /// Env var names whose platform path-list values are validated
     /// against workspace + allowed_paths before passing to child processes.
     path_env_vars: []const []const u8 = &.{},
 
@@ -757,8 +757,10 @@ test "validatePathEnvValue allows empty value" {
 }
 
 test "shell path_env_vars passes validated vars to child" {
-    const builtin = @import("builtin");
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
 
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
@@ -769,19 +771,23 @@ test "shell path_env_vars passes validated vars to child" {
     const libs_path = try std.fs.path.join(std.testing.allocator, &.{ tmp_path, "mylibs" });
     defer std.testing.allocator.free(libs_path);
 
-    // Set the env var for this test
-    // Note: we can't easily test env var passthrough without setting
-    // an actual env var, so we test the validation function directly above.
-    // The integration is tested by verifying the ShellTool accepts the field.
+    const key_z = try std.testing.allocator.dupeZ(u8, "TEST_LIB_PATH");
+    defer std.testing.allocator.free(key_z);
+    const value_z = try std.testing.allocator.dupeZ(u8, libs_path);
+    defer std.testing.allocator.free(value_z);
+    try std.testing.expectEqual(@as(c_int, 0), c.setenv(key_z.ptr, value_z.ptr, 1));
+    defer _ = c.unsetenv(key_z.ptr);
+
     var st = ShellTool{
         .workspace_dir = tmp_path,
         .path_env_vars = &.{"TEST_LIB_PATH"},
     };
     const t = st.tool();
-    const parsed = try root.parseTestArgs("{\"command\": \"echo ok\"}");
+    const parsed = try root.parseTestArgs("{\"command\": \"printf '%s' \\\"$TEST_LIB_PATH\\\"\"}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     defer if (result.error_msg) |e| std.testing.allocator.free(e);
     try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings(libs_path, result.output);
 }
