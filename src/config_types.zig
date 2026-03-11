@@ -817,6 +817,7 @@ pub const MemoryConfig = struct {
     postgres: MemoryPostgresConfig = .{},
     redis: MemoryRedisConfig = .{},
     api: MemoryApiConfig = .{},
+    clickhouse: MemoryClickHouseConfig = .{},
     retrieval_stages: MemoryRetrievalStagesConfig = .{},
     summarizer: MemorySummarizerConfig = .{},
 
@@ -1030,6 +1031,17 @@ pub const MemoryApiConfig = struct {
     api_key: []const u8 = "",
     timeout_ms: u32 = 10_000,
     namespace: []const u8 = "",
+};
+
+pub const MemoryClickHouseConfig = struct {
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 8123,
+    database: []const u8 = "default",
+    table: []const u8 = "memories",
+    user: []const u8 = "",
+    password: []const u8 = "",
+    /// Plain HTTP is accepted only for loopback hosts; remote endpoints must use HTTPS.
+    use_https: bool = false,
 };
 
 pub const MemoryRetrievalStagesConfig = struct {

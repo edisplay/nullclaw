@@ -27,6 +27,7 @@ pub const lancedb = if (build_options.enable_memory_lancedb) @import("engines/la
     pub const LanceDbMemory = struct {};
 };
 pub const api = @import("engines/api.zig");
+pub const clickhouse = @import("engines/clickhouse.zig");
 pub const registry = @import("engines/registry.zig");
 
 // retrieval/ (Layer B: Retrieval Engine)
@@ -70,6 +71,7 @@ pub const InMemoryLruMemory = memory_lru.InMemoryLruMemory;
 pub const LucidMemory = lucid.LucidMemory;
 pub const PostgresMemory = if (build_options.enable_postgres) postgres.PostgresMemory else struct {};
 pub const RedisMemory = redis.RedisMemory;
+pub const ClickHouseMemory = clickhouse.ClickHouseMemory;
 pub const LanceDbMemory = lancedb.LanceDbMemory;
 pub const ApiMemory = api.ApiMemory;
 pub const ResponseCache = cache.ResponseCache;
@@ -739,7 +741,8 @@ pub fn initRuntime(
     const pg_cfg: ?config_types.MemoryPostgresConfig = if (std.mem.eql(u8, config.backend, "postgres")) config.postgres else null;
     const redis_cfg: ?config_types.MemoryRedisConfig = if (std.mem.eql(u8, config.backend, "redis")) config.redis else null;
     const api_cfg: ?config_types.MemoryApiConfig = if (std.mem.eql(u8, config.backend, "api")) config.api else null;
-    const cfg = registry.resolvePaths(allocator, desc, workspace_dir, pg_cfg, redis_cfg, api_cfg) catch |err| {
+    const clickhouse_cfg: ?config_types.MemoryClickHouseConfig = if (std.mem.eql(u8, config.backend, "clickhouse")) config.clickhouse else null;
+    const cfg = registry.resolvePaths(allocator, desc, workspace_dir, pg_cfg, redis_cfg, api_cfg, clickhouse_cfg) catch |err| {
         log.warn("memory path resolution failed for backend '{s}': {}", .{ config.backend, err });
         return null;
     };
@@ -1997,6 +2000,7 @@ test {
     _ = postgres;
     _ = redis;
     _ = lancedb;
+    _ = clickhouse;
     _ = registry;
     _ = @import("engines/contract_test.zig");
 
