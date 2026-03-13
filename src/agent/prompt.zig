@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fs_compat = @import("../fs_compat.zig");
 const platform = @import("../platform.zig");
+const memory_root = @import("../memory/root.zig");
 const tools_mod = @import("../tools/root.zig");
 const path_prefix = @import("../path_prefix.zig");
 const Tool = tools_mod.Tool;
@@ -1115,6 +1116,45 @@ test "buildSystemPrompt injects BOOTSTRAP.md when present" {
 
     try std.testing.expect(std.mem.indexOf(u8, prompt, "### BOOTSTRAP.md") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "bootstrap-welcome-line") != null);
+}
+
+test "buildSystemPrompt reads bootstrap docs from sqlite provider when workspace files are absent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const workspace = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(workspace);
+
+    var mem_rt = memory_root.initRuntime(std.testing.allocator, &.{ .backend = "sqlite" }, workspace) orelse
+        return error.TestUnexpectedResult;
+    defer mem_rt.deinit();
+
+    const bootstrap_provider = try bootstrap_mod.createProvider(
+        std.testing.allocator,
+        "sqlite",
+        mem_rt.memory,
+        workspace,
+    );
+    defer bootstrap_provider.deinit();
+
+    try bootstrap_provider.store("AGENTS.md", "sqlite-agent-guidance");
+    try bootstrap_provider.store("BOOTSTRAP.md", "sqlite-bootstrap-line");
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("AGENTS.md", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("BOOTSTRAP.md", .{}));
+
+    const prompt = try buildSystemPrompt(std.testing.allocator, .{
+        .workspace_dir = workspace,
+        .model_name = "test-model",
+        .tools = &.{},
+        .bootstrap_provider = bootstrap_provider,
+    });
+    defer std.testing.allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "### AGENTS.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "sqlite-agent-guidance") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "### BOOTSTRAP.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "sqlite-bootstrap-line") != null);
 }
 
 test "buildSystemPrompt injects HEARTBEAT.md when present" {

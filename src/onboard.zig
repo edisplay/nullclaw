@@ -3092,6 +3092,56 @@ test "scaffoldWorkspaceForConfig stores sqlite bootstrap docs outside workspace 
     try std.testing.expect(std.mem.indexOf(u8, bootstrap_content, "BOOTSTRAP.md - Hello, World") != null);
 }
 
+test "resetWorkspacePromptFiles with sqlite rewrites provider docs without touching workspace markdown files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "AGENTS.md",
+        .data = "disk-agents-before",
+    });
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    var mem_rt = memory_root.initRuntime(std.testing.allocator, &.{ .backend = "sqlite" }, base) orelse
+        return error.TestUnexpectedResult;
+    defer mem_rt.deinit();
+
+    const bootstrap_provider = try bootstrap_mod.createProvider(
+        std.testing.allocator,
+        "sqlite",
+        mem_rt.memory,
+        base,
+    );
+    defer bootstrap_provider.deinit();
+
+    const report = try resetWorkspacePromptFiles(
+        std.testing.allocator,
+        base,
+        &ProjectContext{},
+        .{ .include_bootstrap = true },
+        bootstrap_provider,
+    );
+    try std.testing.expectEqual(@as(usize, 7), report.rewritten_files);
+    try std.testing.expectEqual(@as(usize, 0), report.removed_files);
+
+    const disk_agents = try fs_compat.readFileAlloc(tmp.dir, std.testing.allocator, "AGENTS.md", 64 * 1024);
+    defer std.testing.allocator.free(disk_agents);
+    try std.testing.expectEqualStrings("disk-agents-before", disk_agents);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("BOOTSTRAP.md", .{}));
+
+    const stored_agents = try bootstrap_provider.load(std.testing.allocator, "AGENTS.md") orelse
+        return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stored_agents);
+    try std.testing.expect(std.mem.indexOf(u8, stored_agents, "AGENTS.md - Your Workspace") != null);
+
+    const stored_bootstrap = try bootstrap_provider.load(std.testing.allocator, "BOOTSTRAP.md") orelse
+        return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stored_bootstrap);
+    try std.testing.expect(std.mem.indexOf(u8, stored_bootstrap, "BOOTSTRAP.md - Hello, World") != null);
+}
+
 // ── Additional onboard tests ────────────────────────────────────
 
 test "canonicalProviderName passthrough for known providers" {
