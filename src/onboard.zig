@@ -415,6 +415,39 @@ const claude_cli_fallback = [_][]const u8{
 };
 
 const MAX_MODELS = 20;
+const MODELS_DEV_URL = "https://models.dev/api.json";
+
+const ModelsDevProvider = struct {
+    canonical: []const u8,
+    key: []const u8,
+};
+
+const models_dev_providers = [_]ModelsDevProvider{
+    .{ .canonical = "anthropic", .key = "anthropic" },
+    .{ .canonical = "claude-cli", .key = "anthropic" },
+    .{ .canonical = "openai", .key = "openai" },
+    .{ .canonical = "groq", .key = "groq" },
+    .{ .canonical = "deepseek", .key = "deepseek" },
+    .{ .canonical = "gemini", .key = "google" },
+    .{ .canonical = "vertex", .key = "google-vertex" },
+    .{ .canonical = "z.ai", .key = "zai" },
+    .{ .canonical = "glm", .key = "zhipuai" },
+    .{ .canonical = "qwen", .key = "alibaba" },
+    .{ .canonical = "together-ai", .key = "togetherai" },
+    .{ .canonical = "fireworks-ai", .key = "fireworks-ai" },
+    .{ .canonical = "mistral", .key = "mistral" },
+    .{ .canonical = "xai", .key = "xai" },
+    .{ .canonical = "venice", .key = "venice" },
+    .{ .canonical = "moonshot", .key = "moonshotai" },
+    .{ .canonical = "synthetic", .key = "synthetic" },
+    .{ .canonical = "minimax", .key = "minimax" },
+    .{ .canonical = "cohere", .key = "cohere" },
+    .{ .canonical = "perplexity", .key = "perplexity" },
+    .{ .canonical = "nvidia", .key = "nvidia" },
+    .{ .canonical = "bedrock", .key = "amazon-bedrock" },
+    .{ .canonical = "copilot", .key = "github-copilot" },
+    .{ .canonical = "poe", .key = "poe" },
+};
 
 /// Return a heap-allocated copy of the static fallback list for a provider.
 /// Caller owns the returned slice and all its strings.
@@ -459,7 +492,9 @@ pub fn fetchModels(allocator: std.mem.Allocator, provider: []const u8, api_key: 
 }
 
 /// Fetch model IDs from a provider's API. Returns owned slice of owned strings.
-/// For providers without a list endpoint (anthropic, gemini, etc.), returns hardcoded list.
+/// Native list endpoints are preferred when available. For providers without a
+/// native listing API, or when setup lacks credentials, production builds fall
+/// back to the public models.dev catalog before using hardcoded defaults.
 /// Results are limited to MAX_MODELS entries.
 pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, api_key: ?[]const u8) ![][]const u8 {
     const canonical = canonicalProviderName(provider);
@@ -468,7 +503,20 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
         return codex_support.loadCodexModels(allocator);
     }
 
-    // Providers with no models-list API
+    if (fetchModelsFromNativeApi(allocator, canonical, api_key) catch null) |models| {
+        return models;
+    }
+
+    // Tests must stay deterministic and offline; production can consult the
+    // public models.dev catalog as a secondary source.
+    if (!builtin.is_test and shouldUseModelsDevCatalog(canonical, api_key)) {
+        if (fetchModelsFromModelsDev(allocator, canonical) catch null) |models| {
+            return models;
+        }
+    }
+
+    // Providers with no models-list API (or purely local catalogs) keep the
+    // static fallback path for offline/test use.
     if (std.mem.eql(u8, canonical, "anthropic") or
         std.mem.eql(u8, canonical, "gemini") or
         std.mem.eql(u8, canonical, "vertex") or
@@ -476,19 +524,13 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
         std.mem.eql(u8, canonical, "ollama") or
         std.mem.eql(u8, canonical, "claude-cli"))
     {
-        const fallback = fallbackModelsForProvider(canonical);
-        var result: std.ArrayListUnmanaged([]const u8) = .empty;
-        errdefer {
-            for (result.items) |item| allocator.free(item);
-            result.deinit(allocator);
-        }
-        for (fallback) |m| {
-            try result.append(allocator, try allocator.dupe(u8, m));
-        }
-        return result.toOwnedSlice(allocator);
+        return dupeFallbackModels(allocator, canonical);
     }
 
-    // Determine URL, auth, and optional prefix filter
+    return error.FetchFailed;
+}
+
+fn fetchModelsFromNativeApi(allocator: std.mem.Allocator, canonical: []const u8, api_key: ?[]const u8) !?[][]const u8 {
     var url: []const u8 = undefined;
     var url_to_free: ?[]const u8 = null;
     var needs_auth = false;
@@ -497,38 +539,135 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
 
     if (std.mem.eql(u8, canonical, "openrouter")) {
         url = "https://openrouter.ai/api/v1/models";
-        needs_auth = false; // OpenRouter models endpoint is public
     } else if (std.mem.eql(u8, canonical, "openai")) {
         url = "https://api.openai.com/v1/models";
         needs_auth = true;
-        prefix_filter = "gpt-"; // Only return GPT models from OpenAI
+        prefix_filter = "gpt-";
     } else if (std.mem.eql(u8, canonical, "groq")) {
         url = "https://api.groq.com/openai/v1/models";
         needs_auth = true;
     } else if (std.mem.startsWith(u8, canonical, "http://") or std.mem.startsWith(u8, canonical, "https://")) {
-        // Custom OpenAI-compatible API endpoint
         url_to_free = try buildModelsUrl(allocator, canonical);
         url = url_to_free.?;
         needs_auth = true;
-        // No prefix filter for custom endpoints
     } else {
-        return error.FetchFailed;
+        return null;
     }
 
-    // Build auth header if needed
     var headers_buf: [1][]const u8 = undefined;
     var headers: []const []const u8 = &.{};
     if (needs_auth) {
-        const key = api_key orelse return error.FetchFailed;
+        const key = api_key orelse return null;
         const auth_hdr = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{key});
         defer allocator.free(auth_hdr);
         headers_buf[0] = auth_hdr;
         headers = &headers_buf;
-        // Must call curlGet before auth_hdr is freed
-        return fetchAndParseModels(allocator, url, headers, prefix_filter);
     }
 
-    return fetchAndParseModels(allocator, url, headers, prefix_filter);
+    return try fetchAndParseModels(allocator, url, headers, prefix_filter);
+}
+
+fn modelsDevProviderKey(provider: []const u8) ?[]const u8 {
+    for (models_dev_providers) |entry| {
+        if (std.mem.eql(u8, entry.canonical, provider)) return entry.key;
+    }
+    return null;
+}
+
+fn shouldUseModelsDevCatalog(provider: []const u8, api_key: ?[]const u8) bool {
+    if (modelsDevProviderKey(provider) == null) return false;
+    if (std.mem.eql(u8, provider, "openai") or std.mem.eql(u8, provider, "groq")) {
+        return api_key == null;
+    }
+    return true;
+}
+
+fn modelsCacheProviderKey(allocator: std.mem.Allocator, provider: []const u8, api_key: ?[]const u8) ![]const u8 {
+    if (!shouldUseModelsDevCatalog(provider, api_key)) {
+        return try allocator.dupe(u8, provider);
+    }
+    return try std.fmt.allocPrint(allocator, "{s}@models.dev", .{provider});
+}
+
+fn fetchModelsFromModelsDev(allocator: std.mem.Allocator, provider: []const u8) !?[][]const u8 {
+    const provider_key = modelsDevProviderKey(provider) orelse return null;
+
+    const response = http_util.curlGet(allocator, MODELS_DEV_URL, &.{}, "10") catch return error.FetchFailed;
+    defer allocator.free(response);
+
+    return try parseModelsDevModelIds(allocator, response, provider, provider_key);
+}
+
+fn parseModelsDevModelIds(
+    allocator: std.mem.Allocator,
+    json_response: []const u8,
+    provider: []const u8,
+    provider_key: []const u8,
+) ![][]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_response, .{}) catch return error.FetchFailed;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.FetchFailed;
+    const provider_val = parsed.value.object.get(provider_key) orelse return error.FetchFailed;
+    if (provider_val != .object) return error.FetchFailed;
+
+    const models_val = provider_val.object.get("models") orelse return error.FetchFailed;
+    if (models_val != .object) return error.FetchFailed;
+
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (result.items) |item| allocator.free(item);
+        result.deinit(allocator);
+    }
+
+    var it = models_val.object.iterator();
+    while (it.next()) |entry| {
+        if (result.items.len >= MAX_MODELS) break;
+        if (!modelsDevModelSupportsChat(entry.key_ptr.*, entry.value_ptr.*)) continue;
+        try result.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
+    }
+
+    if (result.items.len == 0) return error.FetchFailed;
+    prioritizeDefaultModel(result.items, defaultModelForProvider(provider));
+    return result.toOwnedSlice(allocator);
+}
+
+fn modelsDevModelSupportsChat(model_id: []const u8, model_val: std.json.Value) bool {
+    if (model_val != .object) return false;
+
+    const obj = model_val.object;
+    if (obj.get("family")) |family_val| {
+        if (family_val == .string and std.mem.indexOf(u8, family_val.string, "embedding") != null) {
+            return false;
+        }
+    }
+    if (std.mem.indexOf(u8, model_id, "embedding") != null) return false;
+
+    const modalities_val = obj.get("modalities") orelse return true;
+    if (modalities_val != .object) return true;
+
+    const input_val = modalities_val.object.get("input") orelse return true;
+    const output_val = modalities_val.object.get("output") orelse return true;
+    return jsonStringArrayContains(input_val, "text") and jsonStringArrayContains(output_val, "text");
+}
+
+fn jsonStringArrayContains(value: std.json.Value, needle: []const u8) bool {
+    if (value != .array) return false;
+    for (value.array.items) |item| {
+        if (item == .string and std.mem.eql(u8, item.string, needle)) return true;
+    }
+    return false;
+}
+
+fn prioritizeDefaultModel(models: [][]const u8, default_model: []const u8) void {
+    for (models, 0..) |model, idx| {
+        if (!std.mem.eql(u8, model, default_model)) continue;
+        if (idx == 0) return;
+        const tmp = models[0];
+        models[0] = model;
+        models[idx] = tmp;
+        return;
+    }
 }
 
 fn fetchAndParseModels(allocator: std.mem.Allocator, url: []const u8, headers: []const []const u8, prefix_filter: ?[]const u8) ![][]const u8 {
@@ -600,9 +739,11 @@ fn loadModelsWithCacheInner(allocator: std.mem.Allocator, cache_dir: []const u8,
     const canonical = canonicalProviderName(provider);
     const cache_path = try std.fmt.allocPrint(allocator, "{s}/models_cache.json", .{cache_dir});
     defer allocator.free(cache_path);
+    const cache_provider = try modelsCacheProviderKey(allocator, canonical, api_key);
+    defer allocator.free(cache_provider);
 
     // Try reading cache file
-    if (readCachedModels(allocator, cache_path, canonical)) |cached| {
+    if (readCachedModels(allocator, cache_path, cache_provider)) |cached| {
         return cached;
     } else |_| {}
 
@@ -611,7 +752,7 @@ fn loadModelsWithCacheInner(allocator: std.mem.Allocator, cache_dir: []const u8,
 
     // Best-effort: save to cache (coerce [][]const u8 -> []const []const u8)
     const models_const: []const []const u8 = models;
-    saveCachedModels(allocator, cache_path, canonical, models_const) catch {};
+    saveCachedModels(allocator, cache_path, cache_provider, models_const) catch {};
 
     return models;
 }
@@ -3928,6 +4069,57 @@ test "cache read returns error for expired cache" {
     try std.testing.expectError(error.CacheExpired, result);
 }
 
+test "modelsCacheProviderKey keeps public catalog separate from native listings" {
+    const public_key = try modelsCacheProviderKey(std.testing.allocator, "openai", null);
+    defer std.testing.allocator.free(public_key);
+    try std.testing.expectEqualStrings("openai@models.dev", public_key);
+
+    const native_key = try modelsCacheProviderKey(std.testing.allocator, "openai", "test-key");
+    defer std.testing.allocator.free(native_key);
+    try std.testing.expectEqualStrings("openai", native_key);
+
+    const anthropic_key = try modelsCacheProviderKey(std.testing.allocator, "anthropic", null);
+    defer std.testing.allocator.free(anthropic_key);
+    try std.testing.expectEqualStrings("anthropic@models.dev", anthropic_key);
+}
+
+test "loadModelsWithCache keeps public and native cache entries separate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const cache_path = try std.fs.path.join(std.testing.allocator, &.{ base, "models_cache.json" });
+    defer std.testing.allocator.free(cache_path);
+
+    const cache_json = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"fetched_at\": {d}, \"openai\": [\"gpt-native\"], \"openai@models.dev\": [\"gpt-public\"]}}",
+        .{std.time.timestamp()},
+    );
+    defer std.testing.allocator.free(cache_json);
+
+    const file = try tmp.dir.createFile("models_cache.json", .{});
+    defer file.close();
+    try file.writeAll(cache_json);
+
+    const public_models = try loadModelsWithCache(std.testing.allocator, base, "openai", null);
+    defer {
+        for (public_models) |m| std.testing.allocator.free(m);
+        std.testing.allocator.free(public_models);
+    }
+    try std.testing.expectEqual(@as(usize, 1), public_models.len);
+    try std.testing.expectEqualStrings("gpt-public", public_models[0]);
+
+    const native_models = try loadModelsWithCache(std.testing.allocator, base, "openai", "test-key");
+    defer {
+        for (native_models) |m| std.testing.allocator.free(m);
+        std.testing.allocator.free(native_models);
+    }
+    try std.testing.expectEqual(@as(usize, 1), native_models.len);
+    try std.testing.expectEqualStrings("gpt-native", native_models[0]);
+}
+
 test "loadModelsWithCache falls back on fetch failure" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4075,6 +4267,48 @@ test "fetchModels handles google alias" {
     }
     try std.testing.expect(models.len >= 2);
     try std.testing.expectEqualStrings("gemini-2.5-pro", models[0]);
+}
+
+test "modelsDevProviderKey maps known providers" {
+    try std.testing.expectEqualStrings("anthropic", modelsDevProviderKey("claude-cli").?);
+    try std.testing.expectEqualStrings("google", modelsDevProviderKey("gemini").?);
+    try std.testing.expectEqualStrings("google-vertex", modelsDevProviderKey("vertex").?);
+    try std.testing.expectEqualStrings("zai", modelsDevProviderKey("z.ai").?);
+    try std.testing.expect(modelsDevProviderKey("ollama") == null);
+}
+
+test "parseModelsDevModelIds filters non-chat models and prioritizes default" {
+    const json =
+        \\{
+        \\  "anthropic": {
+        \\    "models": {
+        \\      "claude-haiku-4-5": {
+        \\        "modalities": {"input": ["text"], "output": ["text"]}
+        \\      },
+        \\      "claude-embedding-1": {
+        \\        "family": "text-embedding",
+        \\        "modalities": {"input": ["text"], "output": ["text"]}
+        \\      },
+        \\      "claude-opus-4-6": {
+        \\        "modalities": {"input": ["text"], "output": ["text"]}
+        \\      },
+        \\      "claude-audio-1": {
+        \\        "modalities": {"input": ["audio"], "output": ["text"]}
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const models = try parseModelsDevModelIds(std.testing.allocator, json, "anthropic", "anthropic");
+    defer {
+        for (models) |m| std.testing.allocator.free(m);
+        std.testing.allocator.free(models);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), models.len);
+    try std.testing.expectEqualStrings("claude-opus-4-6", models[0]);
+    try std.testing.expectEqualStrings("claude-haiku-4-5", models[1]);
 }
 
 test "parseModelIds respects data ordering" {
