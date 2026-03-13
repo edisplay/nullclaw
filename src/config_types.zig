@@ -1121,25 +1121,11 @@ pub const MemorySummarizerConfig = struct {
 
 // ── Tunnel config ───────────────────────────────────────────────
 
-pub const CloudflareTunnelConfig = struct {
-    token: []const u8 = "",
-};
-
-pub const TailscaleTunnelConfig = struct {
-    funnel: bool = false,
-    hostname: ?[]const u8 = null,
-};
-
-pub const NgrokTunnelConfig = struct {
-    auth_token: []const u8 = "",
-    domain: ?[]const u8 = null,
-};
-
-pub const CustomTunnelConfig = struct {
-    start_command: []const u8 = "",
-    health_url: ?[]const u8 = null,
-    url_pattern: ?[]const u8 = null,
-};
+// Re-export tunnel config types from tunnel.zig
+pub const CloudflareTunnelConfig = @import("tunnel.zig").CloudflareTunnelConfig;
+pub const TailscaleTunnelConfig = @import("tunnel.zig").TailscaleTunnelConfig;
+pub const NgrokTunnelConfig = @import("tunnel.zig").NgrokTunnelConfig;
+pub const CustomTunnelConfig = @import("tunnel.zig").CustomTunnelConfig;
 
 pub const TunnelConfig = struct {
     provider: []const u8 = "none",

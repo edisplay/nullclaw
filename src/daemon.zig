@@ -928,14 +928,15 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     state.addComponent("scheduler");
 
     // Start tunnel if configured (before gateway so URL is available for webhooks)
+    state.addComponent("tunnel");
     var tunnel: ?tunnel_mod.Tunnel = null;
     if (!std.mem.eql(u8, config.tunnel.provider, "none")) {
         const tunnel_cfg = tunnel_mod.TunnelFullConfig{
             .provider = config.tunnel.provider,
-            .cloudflare = if (config.tunnel.cloudflare) |cf| .{ .token = cf.token } else null,
-            .ngrok = if (config.tunnel.ngrok) |ng| .{ .auth_token = ng.auth_token, .domain = ng.domain } else null,
-            .tailscale = if (config.tunnel.tailscale) |ts| .{ .funnel = ts.funnel, .hostname = ts.hostname } else null,
-            .custom = if (config.tunnel.custom) |cst| .{ .start_command = cst.start_command, .health_url = cst.health_url, .url_pattern = cst.url_pattern } else null,
+            .cloudflare = config.tunnel.cloudflare,
+            .ngrok = config.tunnel.ngrok,
+            .tailscale = config.tunnel.tailscale,
+            .custom = config.tunnel.custom,
         };
         tunnel = tunnel_mod.createTunnel(tunnel_cfg) catch |err| blk: {
             log.warn("Failed to create tunnel: {s}", .{@errorName(err)});
@@ -2224,4 +2225,60 @@ test "writeStateFile produces valid content" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"status\": \"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "test-comp") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "127.0.0.1:8080") != null);
+}
+
+test "writeStateFile includes tunnel fields" {
+    var state = DaemonState{
+        .started = true,
+        .gateway_host = "127.0.0.1",
+        .gateway_port = 3000,
+        .tunnel_provider = "ngrok",
+        .tunnel_url = "https://test.ngrok-free.app",
+    };
+    state.addComponent("gateway");
+    state.addComponent("tunnel");
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
+    defer std.testing.allocator.free(path);
+
+    try writeStateFile(std.testing.allocator, path, &state);
+
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
+    defer std.testing.allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"tunnel_provider\": \"ngrok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"tunnel_url\": \"https://test.ngrok-free.app\"") != null);
+}
+
+test "writeStateFile handles null tunnel_url" {
+    var state = DaemonState{
+        .started = true,
+        .gateway_host = "127.0.0.1",
+        .gateway_port = 3000,
+        .tunnel_provider = "none",
+        .tunnel_url = null,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ dir, "daemon_state.json" });
+    defer std.testing.allocator.free(path);
+
+    try writeStateFile(std.testing.allocator, path, &state);
+
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
+    defer std.testing.allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"tunnel_provider\": \"none\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"tunnel_url\": null") != null);
 }

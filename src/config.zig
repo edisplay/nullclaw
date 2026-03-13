@@ -1629,7 +1629,11 @@ test "save roundtrip preserves extended config sections" {
     cfg.gateway.idempotency_ttl_secs = 120;
     cfg.gateway.paired_tokens = &.{ "tok-1", "tok-2" };
 
-    cfg.tunnel.provider = "cloudflare";
+    cfg.tunnel.provider = "ngrok";
+    cfg.tunnel.ngrok = .{
+        .auth_token = "ngrok-test-token",
+        .domain = "test.ngrok-free.app",
+    };
 
     cfg.composio.enabled = true;
     cfg.composio.api_key = "comp-key";
@@ -1730,7 +1734,10 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expect(loaded.memory.response_cache.enabled);
     try std.testing.expectEqual(@as(u32, 2), loaded.gateway.paired_tokens.len);
     try std.testing.expect(loaded.gateway.allow_public_bind);
-    try std.testing.expectEqualStrings("cloudflare", loaded.tunnel.provider);
+    try std.testing.expectEqualStrings("ngrok", loaded.tunnel.provider);
+    try std.testing.expect(loaded.tunnel.ngrok != null);
+    try std.testing.expectEqualStrings("ngrok-test-token", loaded.tunnel.ngrok.?.auth_token.?);
+    try std.testing.expectEqualStrings("test.ngrok-free.app", loaded.tunnel.ngrok.?.domain.?);
     try std.testing.expect(loaded.composio.enabled);
     try std.testing.expect(!loaded.secrets.encrypt);
     try std.testing.expect(loaded.browser.enabled);
