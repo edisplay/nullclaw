@@ -156,6 +156,40 @@ pub fn planTurnInput(message: []const u8) TurnInputPlan {
     return .{ .llm_user_message = message };
 }
 
+pub fn persistedRuntimeCommand(message: []const u8) ?[]const u8 {
+    const cmd = parseSlashCommand(message) orelse return null;
+    const kind = classifySlashCommand(cmd);
+    const arg = std.mem.trim(u8, cmd.arg, " \t");
+    const first = firstToken(arg);
+
+    return switch (kind) {
+        .think, .verbose, .reasoning, .usage, .activation, .send, .elevated => blk: {
+            if (first.len == 0 or std.ascii.eqlIgnoreCase(first, "status")) break :blk null;
+            break :blk message;
+        },
+        .exec, .tts => blk: {
+            if (arg.len == 0 or std.ascii.eqlIgnoreCase(arg, "status")) break :blk null;
+            break :blk message;
+        },
+        .queue => blk: {
+            if (arg.len == 0 or std.ascii.eqlIgnoreCase(arg, "status")) break :blk null;
+            break :blk message;
+        },
+        .session => blk: {
+            if (!std.ascii.eqlIgnoreCase(first, "ttl")) break :blk null;
+            const tail = splitFirstToken(arg).tail;
+            if (firstToken(tail).len == 0) break :blk null;
+            break :blk message;
+        },
+        .focus, .unfocus, .dock_telegram, .dock_discord, .dock_slack => message,
+        .debug => blk: {
+            if (std.ascii.eqlIgnoreCase(arg, "reset")) break :blk message;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
 fn firstToken(arg: []const u8) []const u8 {
     var it = std.mem.tokenizeAny(u8, arg, " \t");
     return it.next() orelse "";
