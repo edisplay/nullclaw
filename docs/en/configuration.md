@@ -403,6 +403,7 @@ Tunnel providers for exposing the gateway to the public internet. Required for w
 ### `autonomy`
 
 - `level`: start with `supervised`.
+- `level = "yolo"`: bypasses command policy checks; use only for trusted local debugging.
 - `workspace_only`: keep `true` to limit file access scope.
 - `max_actions_per_hour`: keep conservative limits first.
 
