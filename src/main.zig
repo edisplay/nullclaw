@@ -2281,13 +2281,21 @@ fn printConfiguredRuntimeChannelNames(config: *const yc.config.Config) void {
 
     for (config.channels.external) |external_cfg| {
         if (external_cfg.runtime_name.len == 0) continue;
-        std.debug.print(if (first) "Configured runtime channel names: {s}" else ", {s}", .{external_cfg.runtime_name});
+        if (first) {
+            std.debug.print("Configured runtime channel names: {s}", .{external_cfg.runtime_name});
+        } else {
+            std.debug.print(", {s}", .{external_cfg.runtime_name});
+        }
         first = false;
     }
 
     for (config.channels.maixcam) |maixcam_cfg| {
         if (maixcam_cfg.name.len == 0 or std.mem.eql(u8, maixcam_cfg.name, "maixcam")) continue;
-        std.debug.print(if (first) "Configured runtime channel names: {s}" else ", {s}", .{maixcam_cfg.name});
+        if (first) {
+            std.debug.print("Configured runtime channel names: {s}", .{maixcam_cfg.name});
+        } else {
+            std.debug.print(", {s}", .{maixcam_cfg.name});
+        }
         first = false;
     }
 
