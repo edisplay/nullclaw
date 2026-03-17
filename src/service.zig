@@ -689,32 +689,17 @@ fn applyServiceRuntimeProviderOverrides(config: *const Config) !void {
     try providers.setApiErrorLimitOverride(config.diagnostics.api_error_max_chars);
 }
 
-fn isTruthyFlag(value: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(value, "1") or
-        std.ascii.eqlIgnoreCase(value, "true") or
-        std.ascii.eqlIgnoreCase(value, "yes") or
-        std.ascii.eqlIgnoreCase(value, "on");
-}
-
-fn isYoloForceEnabled(allocator: std.mem.Allocator) bool {
-    if (platform.getEnvOrNull(allocator, "NULLCLAW_ALLOW_YOLO")) |v| {
-        defer allocator.free(v);
-        if (isTruthyFlag(v)) return true;
-    }
-    if (platform.getEnvOrNull(allocator, "OPENCLAW_ALLOW_YOLO")) |v| {
-        defer allocator.free(v);
-        if (isTruthyFlag(v)) return true;
-    }
-    return false;
-}
-
 fn runWindowsServiceGatewayProcess(allocator: std.mem.Allocator) !void {
     var cfg = try Config.load(allocator);
     defer cfg.deinit();
 
     try cfg.validate();
     try applyServiceRuntimeProviderOverrides(&cfg);
-    if (!security.isYoloGatewayAllowed(cfg.autonomy.level, cfg.gateway.host, isYoloForceEnabled(allocator))) {
+    if (!security.isYoloGatewayAllowed(cfg.autonomy.level, cfg.gateway.host, security.isYoloForceEnabled(allocator))) {
+        std.debug.print(
+            "Refusing to start gateway service with autonomy.level=yolo on non-local host '{s}'. Use localhost or set NULLCLAW_ALLOW_YOLO=1 to force this insecure mode.\n",
+            .{cfg.gateway.host},
+        );
         return error.InsecureYoloGatewayBind;
     }
 
