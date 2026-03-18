@@ -957,11 +957,27 @@ pub const TelegramChannel = struct {
         self.bot_username = identity.username;
     }
 
+    /// Check if a message is a reply to a message from the bot.
+    /// Returns true if reply_to_message.from.id matches the bot's user ID.
+    fn isReplyToBotMessage(message: std.json.Value, bot_user_id: ?i64) bool {
+        const bot_id = bot_user_id orelse return false;
+        const reply_to_val = message.object.get("reply_to_message") orelse return false;
+        if (reply_to_val != .object) return false;
+        const reply_to = reply_to_val.object;
+        const from_val = reply_to.get("from") orelse return false;
+        if (from_val != .object) return false;
+        const from = from_val.object;
+        const id_val = from.get("id") orelse return false;
+        if (id_val != .integer) return false;
+        return id_val.integer == bot_id;
+    }
+
     /// Check if the bot should process this message based on mention requirements.
     /// In private chats, always returns true.
     /// In groups, returns true only if:
     ///   - require_mention is false, OR
-    ///   - the bot is @mentioned in the message
+    ///   - the bot is @mentioned in the message, OR
+    ///   - the message is a reply to the bot's own message
     pub fn shouldProcessMessage(self: *TelegramChannel, message: std.json.Value) bool {
         const chat_val = message.object.get("chat") orelse return true;
         if (chat_val != .object) return true;
@@ -976,6 +992,9 @@ pub const TelegramChannel = struct {
 
         // If mention not required in groups, respond
         if (!self.require_mention) return true;
+
+        // If replying to bot's own message, respond (bypasses mention requirement)
+        if (isReplyToBotMessage(message, self.bot_user_id)) return true;
 
         // Ensure we have bot username cached
         self.fetchBotUsername();
