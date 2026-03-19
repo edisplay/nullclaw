@@ -700,9 +700,11 @@ Use `channels.web` for browser UI events (WebChannel v1):
 | `/whatsapp` | GET | Query params | Meta webhook verification |
 | `/whatsapp` | POST | None (Meta signature) | WhatsApp incoming message webhook |
 
-### A2A
+### A2A (Agent-to-Agent Protocol v0.3.0)
 
-Enable the gateway binding with:
+NullClaw implements Google's [A2A protocol](https://github.com/google/A2A) v0.3.0, allowing any A2A-compatible agent or client to discover, authenticate, and interact with your instance over JSON-RPC 2.0.
+
+Enable in `~/.nullclaw/config.json`:
 
 ```json
 {
@@ -716,10 +718,32 @@ Enable the gateway binding with:
 }
 ```
 
-- Discover the agent card at `/.well-known/agent-card.json`.
-- Send JSON-RPC requests to `/a2a` using a bearer token obtained from `/pair`.
-- Canonical JSON-RPC methods: `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`, `ListTasks`, `SubscribeToTask`.
-- Legacy slash aliases remain accepted for compatibility: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/list`, `tasks/resubscribe`.
+**Endpoints:**
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /.well-known/agent-card.json` | None | Agent Card discovery (public) |
+| `POST /a2a` | Bearer token | JSON-RPC 2.0 dispatch |
+
+**Supported methods:** `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/list`, `tasks/resubscribe`.
+
+**Quick test:**
+
+```bash
+# 1. Get a bearer token
+TOKEN=$(curl -s -X POST -H "X-Pairing-Code: 123456" http://localhost:3000/pair | jq -r .token)
+
+# 2. Discover the agent
+curl http://localhost:3000/.well-known/agent-card.json
+
+# 3. Send a message
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Hello"}]}}}' \
+  http://localhost:3000/a2a
+```
+
+See [Gateway API docs](docs/en/gateway-api.md) for full A2A reference including streaming, task lifecycle, and configuration details.
 
 ## Commands
 
