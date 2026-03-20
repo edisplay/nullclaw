@@ -21,6 +21,33 @@ fn findProviderEntry(
     return null;
 }
 
+fn buildSubagentSystemPrompt(
+    allocator: std.mem.Allocator,
+    system_prompt: []const u8,
+    workspace_dir: []const u8,
+    tools: []const tools_mod.Tool,
+) ![]const u8 {
+    const tool_instructions = try agent_mod.prompt.buildToolInstructions(allocator, tools);
+    defer allocator.free(tool_instructions);
+
+    const skills_section = try agent_mod.prompt.buildSkillsSection(allocator, workspace_dir);
+    defer allocator.free(skills_section);
+
+    if (skills_section.len > 0) {
+        return std.fmt.allocPrint(
+            allocator,
+            "{s}\n\n{s}{s}",
+            .{ system_prompt, skills_section, tool_instructions },
+        );
+    }
+
+    return std.fmt.allocPrint(
+        allocator,
+        "{s}\n\n{s}",
+        .{ system_prompt, tool_instructions },
+    );
+}
+
 /// Execute a spawned subagent task with the full agent tool loop, constrained
 /// to the restricted `subagentTools` tool set.
 pub fn runTaskWithTools(
@@ -127,24 +154,12 @@ pub fn runTaskWithTools(
     defer agent.deinit();
     agent.policy = &policy;
 
-    const tool_instructions = try agent_mod.prompt.buildToolInstructions(allocator, tools);
-    defer allocator.free(tool_instructions);
-
-    const skills_section = try agent_mod.prompt.buildSkillsSection(allocator, request.workspace_dir);
-    defer allocator.free(skills_section);
-
-    const full_system = if (skills_section.len > 0)
-        try std.fmt.allocPrint(
-            allocator,
-            "{s}\n\n{s}{s}",
-            .{ request.system_prompt, skills_section, tool_instructions },
-        )
-    else
-        try std.fmt.allocPrint(
-            allocator,
-            "{s}\n\n{s}",
-            .{ request.system_prompt, tool_instructions },
-        );
+    const full_system = try buildSubagentSystemPrompt(
+        allocator,
+        request.system_prompt,
+        request.workspace_dir,
+        tools,
+    );
     // After append, ownership transfers to agent.history; agent.deinit() frees it.
     // Use catch to free only if append itself fails (avoids double-free with deinit).
     agent.history.append(allocator, .{
@@ -176,4 +191,41 @@ test "findProviderEntry matches provider aliases" {
     };
     const found = findProviderEntry("AZURE-OPENAI", &entries) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("https://resource.openai.azure.com/openai/v1", found.base_url.?);
+}
+
+test "buildSubagentSystemPrompt includes installed skills before tool instructions" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("skills/commit");
+
+    {
+        const f = try tmp.dir.createFile("skills/commit/skill.json", .{});
+        defer f.close();
+        try f.writeAll("{\"name\": \"commit\", \"description\": \"Git commit helper\", \"always\": true}");
+    }
+    {
+        const f = try tmp.dir.createFile("skills/commit/SKILL.md", .{});
+        defer f.close();
+        try f.writeAll("Always stage before committing.");
+    }
+
+    const workspace_dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
+    const no_tools = [_]tools_mod.Tool{};
+    const prompt = try buildSubagentSystemPrompt(
+        allocator,
+        "You are a background subagent.",
+        workspace_dir,
+        no_tools[0..],
+    );
+    defer allocator.free(prompt);
+
+    const skills_idx = std.mem.indexOf(u8, prompt, "## Skills") orelse return error.TestUnexpectedResult;
+    const tools_idx = std.mem.indexOf(u8, prompt, "## Tool Use Protocol") orelse return error.TestUnexpectedResult;
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Always stage before committing.") != null);
+    try std.testing.expect(skills_idx < tools_idx);
 }
