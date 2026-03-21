@@ -244,6 +244,15 @@ fn printProviderNextSteps(
         return;
     }
 
+    if (std.mem.eql(u8, canonical, "gemini-cli")) {
+        try out.writeAll("    1. Authenticate:  gemini\n");
+        try out.writeAll("       Then choose:   Login with Google\n");
+        try out.writeAll("    2. Interactive chat:  nullclaw agent\n");
+        try out.writeAll("       Then type:         Hello!\n");
+        try out.writeAll("    3. Gateway:       nullclaw gateway\n");
+        return;
+    }
+
     try out.writeAll("    1. Interactive chat:  nullclaw agent\n");
     try out.writeAll("       Then type:         Hello!\n");
     try out.writeAll("    2. Gateway:           nullclaw gateway\n");
@@ -446,6 +455,7 @@ const models_dev_providers = [_]ModelsDevProvider{
     .{ .canonical = "groq", .key = "groq" },
     .{ .canonical = "deepseek", .key = "deepseek" },
     .{ .canonical = "gemini", .key = "google" },
+    .{ .canonical = "gemini-cli", .key = "google" },
     .{ .canonical = "vertex", .key = "google-vertex" },
     .{ .canonical = "z.ai", .key = "zai" },
     .{ .canonical = "glm", .key = "zhipuai" },
@@ -521,12 +531,11 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
         return codex_support.loadCodexModels(allocator);
     }
 
-    // For the gemini CLI, try to fetch models dynamically via `gemini -p "/model"`;
-    // fall back to the static list when the CLI is unavailable or returns nothing.
+    // For the gemini CLI, prefer local discovery when available, then fall back
+    // to the shared models.dev/static pipeline used by other providers.
     if (std.mem.eql(u8, canonical, "gemini-cli")) {
         const dynamic = gemini_cli_mod.GeminiCliProvider.fetchModels(allocator);
         if (dynamic.len > 0) return dynamic;
-        return dupeFallbackModels(allocator, canonical);
     }
 
     if (fetchModelsFromNativeApi(allocator, canonical, api_key) catch null) |models| {
@@ -545,6 +554,7 @@ pub fn fetchModelsFromApi(allocator: std.mem.Allocator, provider: []const u8, ap
     // static fallback path for offline/test use.
     if (std.mem.eql(u8, canonical, "anthropic") or
         std.mem.eql(u8, canonical, "gemini") or
+        std.mem.eql(u8, canonical, "gemini-cli") or
         std.mem.eql(u8, canonical, "vertex") or
         std.mem.eql(u8, canonical, "deepseek") or
         std.mem.eql(u8, canonical, "ollama") or
@@ -2043,6 +2053,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
             try out.writeAll("  -> Uses local OAuth tokens from ~/.nullclaw/auth.json or ~/.codex/auth.json\n\n");
         } else if (std.mem.eql(u8, cfg.default_provider, "codex-cli")) {
             try out.writeAll("  -> Uses your local Codex CLI login (`codex login`)\n\n");
+        } else if (std.mem.eql(u8, cfg.default_provider, "gemini-cli")) {
+            try out.writeAll("  -> Uses your local Gemini CLI login (`gemini` -> Login with Google)\n\n");
         } else {
             try out.writeAll("  -> No API key required for this local provider\n\n");
         }
@@ -3820,6 +3832,19 @@ test "printProviderNextSteps keeps codex-cli auth flow and interactive chat" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Interactive chat:  nullclaw agent") != null);
 }
 
+test "printProviderNextSteps keeps gemini-cli auth flow and interactive chat" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try printProviderNextSteps(&aw.writer, "gemini-cli", "GEMINI_API_KEY", false, false);
+
+    const rendered = aw.writer.buffer[0..aw.writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Authenticate:  gemini") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Login with Google") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "nullclaw agent -m") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Interactive chat:  nullclaw agent") != null);
+}
+
 test "providerEnvVar gemini aliases" {
     try std.testing.expectEqualStrings("GEMINI_API_KEY", providerEnvVar("gemini"));
     try std.testing.expectEqualStrings("GEMINI_API_KEY", providerEnvVar("google"));
@@ -3969,11 +3994,11 @@ test "catalog_providers names are unique" {
     }
 }
 
-test "wizard promptChoice returns default for out-of-range" {
-    // This tests the logic without actual I/O by validating the
-    // boundary: max providers is known_providers.len
-    try std.testing.expect(known_providers.len == 36);
-    // The wizard would clamp to default (0) for out of range input
+test "known_providers includes gemini-cli" {
+    for (known_providers) |provider| {
+        if (std.mem.eql(u8, provider.key, "gemini-cli")) return;
+    }
+    return error.TestUnexpectedResult;
 }
 
 test "findChannelOptionIndex supports number and key" {
@@ -4470,6 +4495,7 @@ test "fetchModels handles google alias" {
 test "modelsDevProviderKey maps known providers" {
     try std.testing.expectEqualStrings("anthropic", modelsDevProviderKey("claude-cli").?);
     try std.testing.expectEqualStrings("google", modelsDevProviderKey("gemini").?);
+    try std.testing.expectEqualStrings("google", modelsDevProviderKey("gemini-cli").?);
     try std.testing.expectEqualStrings("google-vertex", modelsDevProviderKey("vertex").?);
     try std.testing.expectEqualStrings("zai", modelsDevProviderKey("z.ai").?);
     try std.testing.expectEqualStrings("novita-ai", modelsDevProviderKey("novita").?);
