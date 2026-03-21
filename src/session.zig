@@ -1123,6 +1123,8 @@ pub const SessionManager = struct {
             .subagent_manager = self.subagent_manager,
             .bootstrap_provider = bootstrap_provider,
             .backend_name = self.config.memory.backend,
+            .sandbox_backend = self.config.security.sandbox.backend,
+            .sandbox_enabled = self.config.security.sandbox.enabled orelse true,
         }) catch &.{};
         errdefer if (runtime_tools.len > 0) tools_mod.deinitTools(self.allocator, runtime_tools);
 

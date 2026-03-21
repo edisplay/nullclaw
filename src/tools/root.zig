@@ -9,6 +9,10 @@ const memory_mod = @import("../memory/root.zig");
 const Memory = memory_mod.Memory;
 const bootstrap_mod = @import("../bootstrap/root.zig");
 const mcp_mod = @import("../mcp.zig");
+const Sandbox = @import("../security/sandbox.zig").Sandbox;
+const SandboxBackend = @import("../security/sandbox.zig").SandboxBackend;
+const createSandbox = @import("../security/sandbox.zig").createSandbox;
+const ConfigSandboxBackend = @import("../config.zig").SandboxBackend;
 
 // ── JSON arg extraction helpers ─────────────────────────────────
 // Used by all tool implementations to extract typed fields from
@@ -312,6 +316,8 @@ pub fn allTools(
         policy: ?*const @import("../security/policy.zig").SecurityPolicy = null,
         bootstrap_provider: ?bootstrap_mod.BootstrapProvider = null,
         backend_name: []const u8 = "hybrid",
+        sandbox_backend: ConfigSandboxBackend = .auto,
+        sandbox_enabled: bool = true,
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
@@ -333,7 +339,13 @@ pub fn allTools(
         .max_output_bytes = tc.shell_max_output_bytes,
         .policy = opts.policy,
         .path_env_vars = tc.path_env_vars,
+        // sandbox and sandbox_storage initialized below if enabled
     };
+    if (opts.sandbox_enabled) {
+        // Convert from config_types.SandboxBackend to security.detect.SandboxBackend
+        const backend: SandboxBackend = @enumFromInt(@intFromEnum(opts.sandbox_backend));
+        st.sandbox = createSandbox(allocator, backend, workspace_dir, &st.sandbox_storage);
+    }
     try list.append(allocator, st.tool());
 
     const ft = try allocator.create(file_read.FileReadTool);

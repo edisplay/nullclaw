@@ -1177,6 +1177,8 @@ pub const ChannelRuntime = struct {
             .subagent_manager = subagent_manager,
             .bootstrap_provider = bootstrap_provider,
             .backend_name = config.memory.backend,
+            .sandbox_backend = config.security.sandbox.backend,
+            .sandbox_enabled = config.security.sandbox.enabled orelse true,
         }) catch &.{};
         errdefer if (tools.len > 0) tools_mod.deinitTools(allocator, tools);
 
