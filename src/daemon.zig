@@ -323,6 +323,7 @@ fn upsertSchedulerRuntimeJob(
         dst.last_status = runtime_job.last_status;
         dst.paused = runtime_job.paused;
         dst.one_shot = runtime_job.one_shot;
+        dst.session_target = runtime_job.session_target;
         // Update delivery config
         dst.delivery.mode = runtime_job.delivery.mode;
         if (dst.delivery.channel_owned) {
@@ -330,6 +331,11 @@ fn upsertSchedulerRuntimeJob(
         }
         dst.delivery.channel = if (runtime_job.delivery.channel) |c| try allocator.dupe(u8, c) else null;
         dst.delivery.channel_owned = runtime_job.delivery.channel != null;
+        if (dst.delivery.account_id_owned) {
+            if (dst.delivery.account_id) |account_id| allocator.free(account_id);
+        }
+        dst.delivery.account_id = if (runtime_job.delivery.account_id) |account_id| try allocator.dupe(u8, account_id) else null;
+        dst.delivery.account_id_owned = runtime_job.delivery.account_id != null;
         if (dst.delivery.to_owned) {
             if (dst.delivery.to) |t| allocator.free(t);
         }
@@ -359,9 +365,11 @@ fn upsertSchedulerRuntimeJob(
         .delivery = .{
             .mode = runtime_job.delivery.mode,
             .channel = if (runtime_job.delivery.channel) |c| try allocator.dupe(u8, c) else null,
+            .account_id = if (runtime_job.delivery.account_id) |account_id| try allocator.dupe(u8, account_id) else null,
             .to = if (runtime_job.delivery.to) |t| try allocator.dupe(u8, t) else null,
             .best_effort = runtime_job.delivery.best_effort,
             .channel_owned = runtime_job.delivery.channel != null,
+            .account_id_owned = runtime_job.delivery.account_id != null,
             .to_owned = runtime_job.delivery.to != null,
         },
     });
@@ -396,6 +404,10 @@ fn mergeSchedulerTickChangesAndSave(
     }
 
     try cron.saveJobs(&latest);
+}
+
+fn shouldPreserveProvidedSessionKey(msg: *const bus_mod.InboundMessage) bool {
+    return std.mem.eql(u8, msg.sender_id, "system:cron");
 }
 
 /// Scheduler thread — executes due cron jobs and periodically reloads cron.json
@@ -897,12 +909,15 @@ fn inboundDispatcherThread(
         defer parsed_meta.deinit();
 
         const outbound_account_id = parsed_meta.fields.account_id;
-        const routed_session_key = resolveInboundRouteSessionKeyWithMetadata(
-            allocator,
-            runtime.config,
-            &msg,
-            parsed_meta.fields,
-        );
+        const routed_session_key = if (shouldPreserveProvidedSessionKey(&msg))
+            null
+        else
+            resolveInboundRouteSessionKeyWithMetadata(
+                allocator,
+                runtime.config,
+                &msg,
+                parsed_meta.fields,
+            );
         defer if (routed_session_key) |key| allocator.free(key);
         const session_key = routed_session_key orelse msg.session_key;
 
@@ -2441,7 +2456,13 @@ test "mergeSchedulerTickChangesAndSave preserves runtime agent fields" {
 
     var runtime = CronScheduler.init(allocator, 32, true);
     defer runtime.deinit();
-    _ = try runtime.addAgentJob("* * * * *", "summarize merge state", "openrouter/anthropic/claude-sonnet-4", .{});
+    const runtime_job = try runtime.addAgentJob("* * * * *", "summarize merge state", "openrouter/anthropic/claude-sonnet-4", .{
+        .mode = .always,
+        .channel = "telegram",
+        .account_id = "backup",
+        .to = "chat-42",
+    });
+    runtime_job.session_target = .main;
     runtime.jobs.items[runtime.jobs.items.len - 1].next_run_secs = 0;
     try cron.saveJobs(&runtime);
 
@@ -2476,6 +2497,31 @@ test "mergeSchedulerTickChangesAndSave preserves runtime agent fields" {
     try std.testing.expectEqualStrings("summarize merge state", job.prompt.?);
     try std.testing.expect(job.model != null);
     try std.testing.expectEqualStrings("openrouter/anthropic/claude-sonnet-4", job.model.?);
+    try std.testing.expectEqual(cron.SessionTarget.main, job.session_target);
+    try std.testing.expect(job.delivery.account_id != null);
+    try std.testing.expectEqualStrings("backup", job.delivery.account_id.?);
+    try std.testing.expect(job.delivery.to != null);
+    try std.testing.expectEqualStrings("chat-42", job.delivery.to.?);
+}
+
+test "shouldPreserveProvidedSessionKey keeps cron-generated session keys" {
+    const msg = bus_mod.InboundMessage{
+        .channel = "telegram",
+        .sender_id = "system:cron",
+        .chat_id = "chat-42",
+        .content = "done",
+        .session_key = "telegram:backup:chat-42",
+    };
+    try std.testing.expect(shouldPreserveProvidedSessionKey(&msg));
+
+    const other = bus_mod.InboundMessage{
+        .channel = "telegram",
+        .sender_id = "user-7",
+        .chat_id = "chat-42",
+        .content = "hello",
+        .session_key = "telegram:chat-42",
+    };
+    try std.testing.expect(!shouldPreserveProvidedSessionKey(&other));
 }
 
 test "channelSupervisorThread respects shutdown" {

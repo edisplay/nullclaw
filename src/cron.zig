@@ -1389,6 +1389,46 @@ pub fn deliverResult(
     return true;
 }
 
+fn buildCronMainAgentSessionKey(
+    allocator: std.mem.Allocator,
+    delivery: DeliveryConfig,
+    channel: []const u8,
+    chat_id: []const u8,
+) ![]const u8 {
+    if (delivery.account_id) |account_id| {
+        return std.fmt.allocPrint(allocator, "{s}:{s}:{s}", .{ channel, account_id, chat_id });
+    }
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ channel, chat_id });
+}
+
+fn buildCronMainAgentMetadata(
+    allocator: std.mem.Allocator,
+    delivery: DeliveryConfig,
+    chat_id: []const u8,
+) !?[]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    var wrote_field = false;
+    try buf.appendSlice(allocator, "{");
+    if (delivery.account_id) |account_id| {
+        try json_util.appendJsonKeyValue(&buf, allocator, "account_id", account_id);
+        wrote_field = true;
+    }
+    if (chat_id.len > 0) {
+        if (wrote_field) try buf.appendSlice(allocator, ",");
+        try json_util.appendJsonKeyValue(&buf, allocator, "peer_id", chat_id);
+        wrote_field = true;
+    }
+    try buf.appendSlice(allocator, "}");
+
+    if (!wrote_field) {
+        buf.deinit(allocator);
+        return null;
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
 /// Route a cron agent result through the main agent session via the inbound bus.
 /// The main agent receives the output as a system message, processes it with its
 /// full context (soul, memory, skills), and delivers a contextualised response.
@@ -1420,10 +1460,15 @@ pub fn deliverViaMainAgent(
     defer allocator.free(content);
 
     const chat_id = delivery.to orelse "default";
-    const session_key = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ channel, chat_id });
+    const session_key = try buildCronMainAgentSessionKey(allocator, delivery, channel, chat_id);
     defer allocator.free(session_key);
+    const metadata_json = try buildCronMainAgentMetadata(allocator, delivery, chat_id);
+    defer if (metadata_json) |value| allocator.free(value);
 
-    const msg = try bus.makeInbound(allocator, channel, "system:cron", chat_id, content, session_key);
+    const msg = if (metadata_json) |value|
+        try bus.makeInboundFull(allocator, channel, "system:cron", chat_id, content, session_key, &.{}, value)
+    else
+        try bus.makeInbound(allocator, channel, "system:cron", chat_id, content, session_key);
     the_bus.publishInbound(msg) catch |err| {
         if (delivery.best_effort) {
             msg.deinit(allocator);
@@ -1945,7 +1990,14 @@ pub fn cliAddJob(allocator: std.mem.Allocator, expression: []const u8, command: 
 }
 
 /// CLI: add a recurring agent job.
-pub fn cliAddAgentJob(allocator: std.mem.Allocator, expression: []const u8, prompt: []const u8, model: ?[]const u8, delivery: DeliveryConfig) !void {
+pub fn cliAddAgentJob(
+    allocator: std.mem.Allocator,
+    expression: []const u8,
+    prompt: []const u8,
+    model: ?[]const u8,
+    session_target: SessionTarget,
+    delivery: DeliveryConfig,
+) !void {
     if (readGatewayUrl(allocator)) |url| {
         defer allocator.free(url);
         // Build JSON body, escaping string values through json_util
@@ -1958,6 +2010,10 @@ pub fn cliAddAgentJob(allocator: std.mem.Allocator, expression: []const u8, prom
         if (model) |m| {
             body_buf.appendSlice(allocator, ",") catch {};
             json_util.appendJsonKeyValue(&body_buf, allocator, "model", m) catch {};
+        }
+        if (session_target != .isolated) {
+            body_buf.appendSlice(allocator, ",") catch {};
+            json_util.appendJsonKeyValue(&body_buf, allocator, "session_target", session_target.asStr()) catch {};
         }
         if (delivery.mode != .none) {
             body_buf.appendSlice(allocator, ",") catch {};
@@ -1989,6 +2045,7 @@ pub fn cliAddAgentJob(allocator: std.mem.Allocator, expression: []const u8, prom
     try loadJobs(&scheduler);
 
     const job = try scheduler.addAgentJob(expression, prompt, model, delivery);
+    job.session_target = session_target;
     try saveJobs(&scheduler);
 
     log.info("Added agent cron job {s}", .{job.id});
@@ -2024,7 +2081,13 @@ pub fn cliAddOnce(allocator: std.mem.Allocator, delay: []const u8, command: []co
 }
 
 /// CLI: add a one-shot delayed agent task.
-pub fn cliAddAgentOnce(allocator: std.mem.Allocator, delay: []const u8, prompt: []const u8, model: ?[]const u8) !void {
+pub fn cliAddAgentOnce(
+    allocator: std.mem.Allocator,
+    delay: []const u8,
+    prompt: []const u8,
+    model: ?[]const u8,
+    session_target: SessionTarget,
+) !void {
     if (readGatewayUrl(allocator)) |url| {
         defer allocator.free(url);
         var body_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -2037,6 +2100,10 @@ pub fn cliAddAgentOnce(allocator: std.mem.Allocator, delay: []const u8, prompt: 
             body_buf.appendSlice(allocator, ",") catch {};
             json_util.appendJsonKeyValue(&body_buf, allocator, "model", m) catch {};
         }
+        if (session_target != .isolated) {
+            body_buf.appendSlice(allocator, ",") catch {};
+            json_util.appendJsonKeyValue(&body_buf, allocator, "session_target", session_target.asStr()) catch {};
+        }
         body_buf.appendSlice(allocator, "}") catch {};
         if (gatewayPost(allocator, url, "/cron/add", body_buf.items)) return;
     }
@@ -2046,6 +2113,7 @@ pub fn cliAddAgentOnce(allocator: std.mem.Allocator, delay: []const u8, prompt: 
     try loadJobs(&scheduler);
 
     const job = try scheduler.addAgentOnce(delay, prompt, model);
+    job.session_target = session_target;
     try saveJobs(&scheduler);
 
     log.info("Added one-shot agent task {s}", .{job.id});
@@ -2213,6 +2281,7 @@ pub fn cliUpdateJob(
     prompt: ?[]const u8,
     model: ?[]const u8,
     enabled: ?bool,
+    session_target: ?SessionTarget,
 ) !void {
     if (readGatewayUrl(allocator)) |url| {
         defer allocator.free(url);
@@ -2240,6 +2309,10 @@ pub fn cliUpdateJob(
             body_buf.appendSlice(allocator, ",\"enabled\":") catch {};
             body_buf.appendSlice(allocator, if (ena) "true" else "false") catch {};
         }
+        if (session_target) |value| {
+            body_buf.appendSlice(allocator, ",") catch {};
+            json_util.appendJsonKeyValue(&body_buf, allocator, "session_target", value.asStr()) catch {};
+        }
         body_buf.appendSlice(allocator, "}") catch {};
         if (gatewayPost(allocator, url, "/cron/update", body_buf.items)) return;
     }
@@ -2254,6 +2327,7 @@ pub fn cliUpdateJob(
         .prompt = prompt,
         .model = model,
         .enabled = enabled,
+        .session_target = session_target,
     };
     if (scheduler.updateJob(allocator, id, patch)) {
         try saveJobs(&scheduler);
@@ -2716,12 +2790,13 @@ test "save and load roundtrip keeps agent fields" {
     var scheduler = CronScheduler.init(std.testing.allocator, 10, true);
     defer scheduler.deinit();
 
-    _ = try scheduler.addAgentJob("*/15 * * * *", "Summarize release status", "openrouter/anthropic/claude-sonnet-4", .{
+    const recurring = try scheduler.addAgentJob("*/15 * * * *", "Summarize release status", "openrouter/anthropic/claude-sonnet-4", .{
         .mode = .always,
         .channel = "telegram",
         .account_id = "backup",
         .to = "chat-42",
     });
+    recurring.session_target = .main;
     try saveJobs(&scheduler);
 
     var loaded = CronScheduler.init(std.testing.allocator, 10, true);
@@ -2742,6 +2817,7 @@ test "save and load roundtrip keeps agent fields" {
     try std.testing.expectEqualStrings("backup", job.delivery.account_id.?);
     try std.testing.expect(job.delivery.to != null);
     try std.testing.expectEqualStrings("chat-42", job.delivery.to.?);
+    try std.testing.expectEqual(SessionTarget.main, job.session_target);
 }
 
 test "JobType parse and asStr" {
@@ -2796,12 +2872,13 @@ test "updateJob modifies job fields" {
     _ = try scheduler.addJob("* * * * *", "echo original");
     const jobs = scheduler.listJobs();
     const id = jobs[0].id;
-    const patch = CronJobPatch{ .command = "echo updated", .enabled = false };
+    const patch = CronJobPatch{ .command = "echo updated", .enabled = false, .session_target = .main };
     try std.testing.expect(scheduler.updateJob(allocator, id, patch));
     const updated = scheduler.getJob(id).?;
     try std.testing.expectEqualStrings("echo updated", updated.command);
     try std.testing.expect(!updated.enabled);
     try std.testing.expect(updated.paused);
+    try std.testing.expectEqual(SessionTarget.main, updated.session_target);
 }
 
 test "updateJob keeps agent command and prompt in sync" {
@@ -3099,6 +3176,36 @@ test "deliverResult best_effort swallows closed bus error" {
     // Should not return error because best_effort is true
     const delivered = try deliverResult(allocator, delivery, "msg", true, &test_bus);
     try std.testing.expect(!delivered);
+}
+
+test "deliverViaMainAgent preserves account metadata and session key" {
+    const allocator = std.testing.allocator;
+    var test_bus = bus.Bus.init();
+    defer test_bus.close();
+
+    const delivery = DeliveryConfig{
+        .mode = .always,
+        .channel = "telegram",
+        .account_id = "backup",
+        .to = "chat123",
+    };
+
+    const delivered = try deliverViaMainAgent(allocator, delivery, "job output here", true, &test_bus, "traffic");
+    try std.testing.expect(delivered);
+
+    var msg = test_bus.consumeInbound().?;
+    defer msg.deinit(allocator);
+    try std.testing.expectEqualStrings("telegram", msg.channel);
+    try std.testing.expectEqualStrings("system:cron", msg.sender_id);
+    try std.testing.expectEqualStrings("chat123", msg.chat_id);
+    try std.testing.expectEqualStrings("telegram:backup:chat123", msg.session_key);
+    try std.testing.expect(msg.metadata_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg.content, "Scheduled task 'traffic'") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, msg.metadata_json.?, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("backup", parsed.value.object.get("account_id").?.string);
+    try std.testing.expectEqualStrings("chat123", parsed.value.object.get("peer_id").?.string);
 }
 
 test "one-shot job deleted after tick execution" {

@@ -2463,6 +2463,8 @@ fn appendCronJobJson(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloca
     try buf.appendSlice(allocator, if (job.one_shot) "true" else "false");
     try buf.appendSlice(allocator, ",\"job_type\":");
     try appendJsonStringBuf(buf, allocator, job.job_type.asStr());
+    try buf.appendSlice(allocator, ",\"session_target\":");
+    try appendJsonStringBuf(buf, allocator, job.session_target.asStr());
     try buf.appendSlice(allocator, ",\"enabled\":");
     try buf.appendSlice(allocator, if (job.enabled) "true" else "false");
     try buf.appendSlice(allocator, ",\"delete_after_run\":");
@@ -2576,6 +2578,10 @@ fn handleCronAdd(ctx: *WebhookHandlerContext) void {
     const prompt_opt = cronObjectStringField(obj, "prompt");
     const command_opt = cronObjectStringField(obj, "command");
     const model_opt = cronObjectStringField(obj, "model");
+    const session_target = if (cronObjectStringField(obj, "session_target")) |raw|
+        cron_mod.SessionTarget.parse(raw)
+    else
+        cron_mod.SessionTarget.isolated;
     const delivery_mode_opt = cronObjectStringField(obj, "delivery_mode");
     const delivery_channel_opt = cronObjectStringField(obj, "delivery_channel");
     const delivery_account_id_opt = cronObjectStringField(obj, "delivery_account_id");
@@ -2664,6 +2670,7 @@ fn handleCronAdd(ctx: *WebhookHandlerContext) void {
         };
     };
 
+    job_ptr.session_target = session_target;
     cron_mod.saveJobs(sched) catch {};
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -2844,6 +2851,10 @@ fn handleCronUpdate(ctx: *WebhookHandlerContext) void {
     const command = cronObjectStringField(obj, "command");
     const prompt = cronObjectStringField(obj, "prompt");
     const model = cronObjectStringField(obj, "model");
+    const session_target = if (cronObjectStringField(obj, "session_target")) |raw|
+        cron_mod.SessionTarget.parse(raw)
+    else
+        null;
     const paused_opt = cronObjectBoolField(obj, "paused");
     const enabled_explicit = cronObjectBoolField(obj, "enabled");
     const enabled_opt = if (enabled_explicit) |enabled| enabled else if (paused_opt) |paused| !paused else null;
@@ -2861,6 +2872,7 @@ fn handleCronUpdate(ctx: *WebhookHandlerContext) void {
         .command = command,
         .prompt = prompt,
         .model = model,
+        .session_target = session_target,
         .enabled = enabled_opt,
     };
 
@@ -5472,7 +5484,7 @@ test "handleCronAdd preserves delivery routing fields" {
         "POST /cron/add HTTP/1.1\r\n" ++
         "Host: localhost\r\n" ++
         "Content-Type: application/json\r\n\r\n" ++
-        "{\"expression\":\"*/10 * * * *\",\"prompt\":\"Check \\\"traffic\\\"\",\"model\":\"openrouter/anthropic/claude-sonnet-4\",\"delivery_mode\":\"always\",\"delivery_channel\":\"telegram\",\"delivery_account_id\":\"backup\",\"delivery_to\":\"chat-42\",\"delivery_best_effort\":false}";
+        "{\"expression\":\"*/10 * * * *\",\"prompt\":\"Check \\\"traffic\\\"\",\"model\":\"openrouter/anthropic/claude-sonnet-4\",\"session_target\":\"main\",\"delivery_mode\":\"always\",\"delivery_channel\":\"telegram\",\"delivery_account_id\":\"backup\",\"delivery_to\":\"chat-42\",\"delivery_best_effort\":false}";
 
     var ctx = WebhookHandlerContext{
         .root_allocator = req_allocator,
@@ -5492,10 +5504,15 @@ test "handleCronAdd preserves delivery routing fields" {
     try std.testing.expectEqual(cron_mod.DeliveryMode.always, jobs[0].delivery.mode);
     try std.testing.expectEqualStrings("Check \"traffic\"", jobs[0].command);
     try std.testing.expectEqualStrings("Check \"traffic\"", jobs[0].prompt.?);
+    try std.testing.expectEqual(cron_mod.SessionTarget.main, jobs[0].session_target);
     try std.testing.expectEqualStrings("telegram", jobs[0].delivery.channel.?);
     try std.testing.expectEqualStrings("backup", jobs[0].delivery.account_id.?);
     try std.testing.expectEqualStrings("chat-42", jobs[0].delivery.to.?);
     try std.testing.expect(!jobs[0].delivery.best_effort);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, req_allocator, ctx.response_body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("main", parsed.value.object.get("session_target").?.string);
 }
 
 test "handleCronAdd supports one-shot delay payloads" {
@@ -5535,6 +5552,42 @@ test "handleCronAdd supports one-shot delay payloads" {
     try std.testing.expect(jobs[0].one_shot);
     try std.testing.expect(std.mem.startsWith(u8, jobs[0].expression, "@once:"));
     try std.testing.expectEqualStrings("echo once", jobs[0].command);
+}
+
+test "handleCronUpdate accepts session_target" {
+    var scheduler = cron_mod.CronScheduler.init(std.testing.allocator, 8, true);
+    defer scheduler.deinit();
+    const job = try scheduler.addAgentJob("* * * * *", "Summarize incidents", null, .{});
+    setSharedScheduler(&scheduler);
+    defer clearSharedScheduler();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const req_allocator = arena.allocator();
+
+    var state = GatewayState.init(std.testing.allocator);
+    defer state.deinit();
+
+    const raw = try std.fmt.allocPrint(
+        req_allocator,
+        "POST /cron/update HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\r\n{{\"id\":\"{s}\",\"session_target\":\"main\"}}",
+        .{job.id},
+    );
+
+    var ctx = WebhookHandlerContext{
+        .root_allocator = req_allocator,
+        .req_allocator = req_allocator,
+        .raw_request = raw,
+        .method = "POST",
+        .target = "/cron/update",
+        .config_opt = null,
+        .state = &state,
+        .session_mgr_opt = null,
+    };
+    handleCronUpdate(&ctx);
+
+    try std.testing.expectEqualStrings("200 OK", ctx.response_status);
+    try std.testing.expectEqual(cron_mod.SessionTarget.main, scheduler.listJobs()[0].session_target);
 }
 
 test "constants are set correctly" {

@@ -20,6 +20,7 @@ pub fn buildAddBody(
     prompt: ?[]const u8,
     model: ?[]const u8,
     delivery: ?cron.DeliveryConfig,
+    session_target: ?cron.SessionTarget,
 ) ![]u8 {
     var body_buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer body_buf.deinit(allocator);
@@ -41,6 +42,9 @@ pub fn buildAddBody(
     }
     if (model) |value| {
         try appendBodyField(&body_buf, allocator, &wrote_field, "model", value);
+    }
+    if (session_target) |value| {
+        try appendBodyField(&body_buf, allocator, &wrote_field, "session_target", value.asStr());
     }
     if (delivery) |cfg| {
         if (cfg.mode != .none) {
@@ -72,6 +76,7 @@ pub fn buildUpdateBody(
     prompt: ?[]const u8,
     model: ?[]const u8,
     enabled: ?bool,
+    session_target: ?cron.SessionTarget,
 ) ![]u8 {
     var body_buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer body_buf.deinit(allocator);
@@ -94,6 +99,9 @@ pub fn buildUpdateBody(
     }
     if (enabled) |value| {
         try appendBodyLiteral(&body_buf, allocator, &wrote_field, if (value) "\"enabled\":true" else "\"enabled\":false");
+    }
+    if (session_target) |value| {
+        try appendBodyField(&body_buf, allocator, &wrote_field, "session_target", value.asStr());
     }
 
     try body_buf.appendSlice(allocator, "}");
@@ -155,6 +163,7 @@ test "buildAddBody includes delivery fields" {
             .to = "chat-7",
             .best_effort = false,
         },
+        .main,
     );
     defer std.testing.allocator.free(body);
 
@@ -162,6 +171,7 @@ test "buildAddBody includes delivery fields" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("*/15 * * * *", parsed.value.object.get("expression").?.string);
     try std.testing.expectEqualStrings("echo hello", parsed.value.object.get("command").?.string);
+    try std.testing.expectEqualStrings("main", parsed.value.object.get("session_target").?.string);
     try std.testing.expectEqualStrings("always", parsed.value.object.get("delivery_mode").?.string);
     try std.testing.expectEqualStrings("telegram", parsed.value.object.get("delivery_channel").?.string);
     try std.testing.expectEqualStrings("backup", parsed.value.object.get("delivery_account_id").?.string);
@@ -170,7 +180,7 @@ test "buildAddBody includes delivery fields" {
 }
 
 test "buildUpdateBody includes enabled flag" {
-    const body = try buildUpdateBody(std.testing.allocator, "job-9", "*/5 * * * *", "echo updated", null, null, false);
+    const body = try buildUpdateBody(std.testing.allocator, "job-9", "*/5 * * * *", "echo updated", null, null, false, .main);
     defer std.testing.allocator.free(body);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
@@ -179,6 +189,7 @@ test "buildUpdateBody includes enabled flag" {
     try std.testing.expectEqualStrings("*/5 * * * *", parsed.value.object.get("expression").?.string);
     try std.testing.expectEqualStrings("echo updated", parsed.value.object.get("command").?.string);
     try std.testing.expect(!parsed.value.object.get("enabled").?.bool);
+    try std.testing.expectEqualStrings("main", parsed.value.object.get("session_target").?.string);
 }
 
 test "findJobByIdJson returns matching job object" {
