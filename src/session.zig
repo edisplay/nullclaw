@@ -834,7 +834,7 @@ pub const SessionManager = struct {
             std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => {
-                    std.fs.cwd().makePath(parent) catch return;
+                    fs_compat.makePath(parent) catch return;
                 },
             };
         }

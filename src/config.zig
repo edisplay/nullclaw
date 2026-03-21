@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs_compat = @import("fs_compat.zig");
 const platform = @import("platform.zig");
 const provider_names = @import("provider_names.zig");
 const secrets = @import("security/secrets.zig");
@@ -1461,7 +1462,7 @@ pub const Config = struct {
     }
 
     pub fn scaffoldAgentWorkspace(allocator: std.mem.Allocator, workspace_path: []const u8) !void {
-        std.fs.cwd().makePath(workspace_path) catch |err| switch (err) {
+        fs_compat.makePath(workspace_path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
