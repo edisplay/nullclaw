@@ -278,11 +278,54 @@ pub const ReliableProvider = struct {
         };
     }
 
+    fn matchProviderPrefix(model_ref: []const u8, provider_name: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, model_ref, provider_name)) return null;
+        if (model_ref.len <= provider_name.len + 1) return null;
+        if (model_ref[provider_name.len] != '/') return null;
+        return model_ref[provider_name.len + 1 ..];
+    }
+
     fn matchesProvider(provider_name: []const u8, requested: []const u8) bool {
         return std.ascii.eqlIgnoreCase(provider_name, requested);
     }
 
     fn resolveProviderTarget(self: *const ReliableProvider, model_ref: []const u8) ResolvedProviderTarget {
+        var best_target: ?ResolvedProviderTarget = null;
+        var best_prefix_len: usize = 0;
+
+        if (matchProviderPrefix(model_ref, self.inner.getName())) |resolved_model| {
+            best_target = .{
+                .provider = self.inner,
+                .model = resolved_model,
+                .explicit = true,
+            };
+            best_prefix_len = self.inner.getName().len;
+        }
+
+        for (self.extras) |entry| {
+            if (matchProviderPrefix(model_ref, entry.name)) |resolved_model| {
+                if (entry.name.len > best_prefix_len) {
+                    best_target = .{
+                        .provider = entry.provider,
+                        .model = resolved_model,
+                        .explicit = true,
+                    };
+                    best_prefix_len = entry.name.len;
+                }
+            }
+            const provider_runtime_name = entry.provider.getName();
+            if (matchProviderPrefix(model_ref, provider_runtime_name)) |resolved_model| {
+                if (provider_runtime_name.len > best_prefix_len) {
+                    best_target = .{
+                        .provider = entry.provider,
+                        .model = resolved_model,
+                        .explicit = true,
+                    };
+                    best_prefix_len = provider_runtime_name.len;
+                }
+            }
+        }
+
         const split = splitProviderModel(model_ref);
         if (std.mem.eql(u8, self.inner.getName(), "router")) {
             return .{
@@ -291,6 +334,7 @@ pub const ReliableProvider = struct {
                 .explicit = split.provider != null,
             };
         }
+        if (best_target) |target| return target;
         if (split.provider) |requested_provider| {
             for (self.extras) |entry| {
                 if (matchesProvider(entry.name, requested_provider) or
@@ -1219,6 +1263,29 @@ test "ReliableProvider vtable delegates getName" {
     var mock = MockInnerProvider{ .call_count = 0, .fail_until = 0, .supports_tools = false };
     var reliable = ReliableProvider.initWithProvider(mock.toProvider(), 0, 50);
     try std.testing.expectEqualStrings("MockProvider", reliable.provider().getName());
+}
+
+test "ReliableProvider resolves explicit custom url provider refs" {
+    var inner = MockInnerProvider{ .call_count = 0, .fail_until = 0, .supports_tools = false };
+    var extra = MockInnerProvider{ .call_count = 0, .fail_until = 0, .supports_tools = false };
+    const extras = [_]ProviderEntry{
+        .{ .name = "custom:http://127.0.0.1:8000/v1", .provider = extra.toProvider() },
+    };
+
+    var reliable = ReliableProvider.initWithProvider(inner.toProvider(), 0, 50).withExtras(&extras);
+    const prov = reliable.provider();
+
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const request = ChatRequest{ .messages = &msgs };
+    const result = try prov.chat(std.testing.allocator, request, "custom:http://127.0.0.1:8000/v1/claude-haiku-4.5", 0.5);
+    defer if (result.content) |c| std.testing.allocator.free(c);
+    defer if (result.provider.len > 0) std.testing.allocator.free(result.provider);
+    defer if (result.model.len > 0) std.testing.allocator.free(result.model);
+
+    try std.testing.expectEqualStrings("mock chat", result.content.?);
+    try std.testing.expectEqualStrings("claude-haiku-4.5", result.model);
+    try std.testing.expectEqual(@as(u32, 1), extra.call_count);
+    try std.testing.expectEqual(@as(u32, 0), inner.call_count);
 }
 
 test "ReliableProvider vtable zero retries fails immediately" {

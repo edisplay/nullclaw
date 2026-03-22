@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("config_types.zig");
 const agent_routing = @import("agent_routing.zig");
+const model_refs = @import("model_refs.zig");
 const secrets = @import("security/secrets.zig");
 
 const log = std.log.scoped(.config);
@@ -73,41 +74,10 @@ fn freeNamedAgentConfig(allocator: std.mem.Allocator, agent_cfg: *types.NamedAge
 }
 
 fn splitPrimaryModelRef(primary: []const u8) ?PrimaryModelRef {
-    // Handle custom: prefix specially (e.g., "custom:https://example.com/v2/model")
-    if (std.mem.startsWith(u8, primary, "custom:")) {
-        // The format is "custom:<provider_url>/<model>" where <provider_url> may contain slashes.
-        // To preserve model IDs that may also contain '/', split after a versioned API segment:
-        // "/v1/", "/v2/", etc.
-        const proto_start = std.mem.indexOf(u8, primary, "://") orelse return null;
-        var i: usize = proto_start + 3;
-        var model_start: ?usize = null;
-        while (i + 3 < primary.len) : (i += 1) {
-            if (primary[i] != '/' or primary[i + 1] != 'v') continue;
-            var j = i + 2;
-            var has_digit = false;
-            while (j < primary.len and std.ascii.isDigit(primary[j])) : (j += 1) {
-                has_digit = true;
-            }
-            if (!has_digit) continue;
-            if (j < primary.len and primary[j] == '/') {
-                if (j + 1 >= primary.len) return null;
-                model_start = j + 1;
-                break;
-            }
-        }
-        const split_at = model_start orelse return null;
-        return .{
-            .provider = primary[0 .. split_at - 1],
-            .model = primary[split_at..],
-        };
-    }
-
-    // Regular provider/model format (e.g., "openrouter/anthropic/claude-sonnet-4")
-    const slash = std.mem.indexOfScalar(u8, primary, '/') orelse return null;
-    if (slash == 0 or slash + 1 >= primary.len) return null;
+    const split = model_refs.splitProviderModel(primary) orelse return null;
     return .{
-        .provider = primary[0..slash],
-        .model = primary[slash + 1 ..],
+        .provider = split.provider orelse return null,
+        .model = split.model,
     };
 }
 
