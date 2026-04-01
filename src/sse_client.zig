@@ -25,6 +25,7 @@ const READ_TIMEOUT_MS: i32 = 1000;
 /// SSE connection that maintains a persistent HTTP connection for streaming
 pub const SseConnection = struct {
     allocator: std.mem.Allocator,
+    proxy_arena: std.heap.ArenaAllocator,
     client: std.http.Client,
     request: ?std.http.Client.Request,
     /// The body reader for streaming response data
@@ -45,9 +46,13 @@ pub const SseConnection = struct {
 
     /// Initialize a new SSE connection (not yet connected)
     pub fn init(allocator: std.mem.Allocator, url: []const u8) SseConnection {
+        var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+        var client = std.http.Client{ .allocator = allocator };
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
         return .{
             .allocator = allocator,
-            .client = std.http.Client{ .allocator = allocator },
+            .proxy_arena = proxy_arena,
+            .client = client,
             .request = null,
             .body_reader = null,
             .url = url,
@@ -66,6 +71,7 @@ pub const SseConnection = struct {
         }
         // Deinit client (closes any remaining connections).
         self.client.deinit();
+        self.proxy_arena.deinit();
         if (self.last_event_id) |id| self.allocator.free(id);
         self.last_event_id = null;
     }

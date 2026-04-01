@@ -362,8 +362,11 @@ pub fn refreshAccessToken(
     client_id: []const u8,
     refresh_token: []const u8,
 ) !OAuthToken {
+    var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+    defer proxy_arena.deinit();
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
+    client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
     const payload = try std.fmt.allocPrint(
         allocator,
@@ -488,8 +491,11 @@ pub fn startDeviceCodeFlow(
     device_auth_url: []const u8,
     scope: []const u8,
 ) !DeviceCode {
+    var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+    defer proxy_arena.deinit();
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
+    client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
     const payload = try std.fmt.allocPrint(
         allocator,
@@ -575,8 +581,11 @@ pub fn pollDeviceCode(
     device_code: []const u8,
     interval_s: u32,
 ) !OAuthToken {
+    var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+    defer proxy_arena.deinit();
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
+    client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
     const payload = try std.fmt.allocPrint(
         allocator,

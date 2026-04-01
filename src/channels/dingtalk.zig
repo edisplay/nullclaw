@@ -719,8 +719,11 @@ pub const DingTalkChannel = struct {
     }
 
     fn postJson(self: *DingTalkChannel, webhook_url: []const u8, body: []const u8) !void {
+        var proxy_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer proxy_arena.deinit();
         var client = std.http.Client{ .allocator = self.allocator };
         defer client.deinit();
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
         const result = client.fetch(.{
             .location = .{ .url = webhook_url },
             .method = .POST,

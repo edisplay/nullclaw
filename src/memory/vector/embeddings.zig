@@ -175,8 +175,11 @@ pub const OpenAiEmbedding = struct {
         const auth_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{self_.api_key});
         defer allocator.free(auth_header);
 
+        var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+        defer proxy_arena.deinit();
         var client = std.http.Client{ .allocator = allocator };
         defer client.deinit();
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();

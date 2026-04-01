@@ -115,8 +115,11 @@ pub fn complete(allocator: std.mem.Allocator, cfg: anytype, prompt: []const u8) 
     var auth_buf: [512]u8 = undefined;
     const auth_val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch return error.NoApiKey;
 
+    var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+    defer proxy_arena.deinit();
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
+    client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -150,8 +153,11 @@ pub fn completeWithSystem(allocator: std.mem.Allocator, cfg: anytype, system_pro
     var auth_buf: [512]u8 = undefined;
     const auth_val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{api_key}) catch return error.NoApiKey;
 
+    var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+    defer proxy_arena.deinit();
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
+    client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();

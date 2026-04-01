@@ -98,8 +98,11 @@ pub const GeminiEmbedding = struct {
         const url = try self_.buildUrl(allocator);
         defer allocator.free(url);
 
+        var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+        defer proxy_arena.deinit();
         var client = std.http.Client{ .allocator = allocator };
         defer client.deinit();
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();

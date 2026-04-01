@@ -284,8 +284,11 @@ pub const WhatsAppChannel = struct {
         try auth_fbs.writer().print("Bearer {s}", .{self.access_token});
         const auth_value = auth_fbs.getWritten();
 
+        var proxy_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer proxy_arena.deinit();
         var client = std.http.Client{ .allocator = self.allocator };
         defer client.deinit();
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
         const result = client.fetch(.{
             .location = .{ .url = url },

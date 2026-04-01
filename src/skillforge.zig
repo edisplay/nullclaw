@@ -85,8 +85,11 @@ pub fn scout(allocator: std.mem.Allocator, query: []const u8) !std.ArrayList(Ski
     defer allocator.free(url);
 
     // Fetch from GitHub API using std.http.Client
+    var proxy_arena = std.heap.ArenaAllocator.init(allocator);
+    defer proxy_arena.deinit();
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
+    client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();

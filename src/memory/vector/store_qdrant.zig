@@ -115,8 +115,11 @@ pub const QdrantVectorStore = struct {
         method: std.http.Method,
         payload: ?[]const u8,
     ) !struct { status: std.http.Status, body: []u8 } {
+        var proxy_arena = std.heap.ArenaAllocator.init(alloc);
+        defer proxy_arena.deinit();
         var client = std.http.Client{ .allocator = alloc };
         defer client.deinit();
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
         var aw: std.Io.Writer.Allocating = .init(alloc);
         errdefer aw.deinit();
@@ -392,8 +395,11 @@ pub const QdrantVectorStore = struct {
         const url = try std.fmt.allocPrint(alloc, "{s}/healthz", .{self.url});
         defer alloc.free(url);
 
+        var proxy_arena = std.heap.ArenaAllocator.init(alloc);
+        defer proxy_arena.deinit();
         var client = std.http.Client{ .allocator = alloc };
         defer client.deinit();
+        client.initDefaultProxies(proxy_arena.allocator()) catch {};
 
         var aw: std.Io.Writer.Allocating = .init(alloc);
         defer aw.deinit();
