@@ -110,6 +110,10 @@ Key config sections: `models.providers` (API keys/endpoints), `agents` (named ag
 - `SQLITE_TRANSIENT` in auto-translated C code: use `SQLITE_STATIC` (null) instead.
 - When unsure about API, search `src/` for existing usage rather than guessing.
 
+## Search Zig Source
+
+Run `zig env` to locate Zig source directories. `.std_dir` points to the standard library, `.lib_dir` to the broader lib tree. Read the source directly to verify struct fields, function signatures, and available methods.
+
 ## Testing Conventions
 
 - All tests use `std.testing.allocator` (leak-detecting GPA). Every allocation must be freed with `defer`.
