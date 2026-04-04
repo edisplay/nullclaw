@@ -2256,6 +2256,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         if (val.object.get("api_mode")) |am| {
                             if (am == .string) pe.api_mode = types.ProviderEntry.ApiMode.parse(am.string);
                         }
+                        if (val.object.get("chat_template_enable_thinking_param")) |ctp| {
+                            if (ctp == .bool) pe.chat_template_enable_thinking_param = ctp.bool;
+                        }
                         if (val.object.get("max_streaming_prompt_bytes")) |mb| {
                             if (mb == .integer and mb.integer >= 0) pe.max_streaming_prompt_bytes = @intCast(mb.integer);
                         }
@@ -2270,6 +2273,20 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     // Channels
     if (root.get("channels")) |ch| {
         try parseChannels(self, ch);
+    }
+
+    if (root.get("messages")) |messages| {
+        if (messages == .object) {
+            if (messages.object.get("inbound")) |inbound| {
+                if (inbound == .object) {
+                    if (inbound.object.get("debounce_ms")) |v| {
+                        if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) {
+                            self.messages.inbound.debounce_ms = @intCast(v.integer);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Session config

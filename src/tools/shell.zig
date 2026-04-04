@@ -280,15 +280,16 @@ pub const ShellTool = struct {
             base_argv = &.{ shell_cmd, shell_flag, command };
         }
 
-        // Apply sandbox wrapper if configured
+        // Apply sandbox wrapper if configured.
         var wrap_buf: [256][]const u8 = undefined;
         const final_argv = try wrapCommandArgv(self.sandbox, base_argv, &wrap_buf);
 
-        // Execute command
+        // Execute command.
         const result = try proc.run(allocator, final_argv, .{
             .cwd = effective_cwd,
             .env_map = &env,
             .max_output_bytes = self.max_output_bytes,
+            .timeout_ns = self.timeout_ns,
         });
         defer allocator.free(result.stderr);
 
@@ -300,6 +301,10 @@ pub const ShellTool = struct {
         defer allocator.free(result.stdout);
         if (result.interrupted) {
             return ToolResult{ .success = false, .output = "", .error_msg = "Interrupted by /stop" };
+        }
+        if (result.timed_out) {
+            const msg = try std.fmt.allocPrint(allocator, "Command timed out after {d}s", .{self.timeout_ns / std.time.ns_per_s});
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
         }
         if (result.exit_code != null) {
             const err_out = try allocator.dupe(u8, if (result.stderr.len > 0) result.stderr else "Command failed with non-zero exit code");
@@ -448,6 +453,23 @@ test "shell reports interruption when cancel flag is set" {
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "Interrupted") != null);
 }
 
+test "shell reports timeout for long-running command" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    var st = ShellTool{ .workspace_dir = ".", .timeout_ns = 100 * std.time.ns_per_ms };
+    const t = st.tool();
+    const parsed = try root.parseTestArgs("{\"command\": \"sleep 5\"}");
+    defer parsed.deinit();
+
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(!result.success);
+    try std.testing.expect(result.error_msg != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "timed out") != null);
+}
+
 test "shell missing command param" {
     var st = ShellTool{ .workspace_dir = "." };
     const t = st.tool();
@@ -582,6 +604,8 @@ test "shell cwd with allowed_paths runs in cwd" {
 }
 
 test "shell sandboxed cwd outside workspace is rejected before spawn" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     try tmp_dir.dir.makeDir("ws");

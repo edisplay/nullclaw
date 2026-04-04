@@ -1347,6 +1347,7 @@ pub const SessionManager = struct {
             self.config.getProviderUserAgent(profile.provider),
             self.config.getProviderApiMode(profile.provider),
             self.config.getProviderMaxStreamingPromptBytes(profile.provider),
+            self.config.getProviderChatTemplateEnableThinkingParam(profile.provider),
         );
         return .{
             .provider = holder.provider(),

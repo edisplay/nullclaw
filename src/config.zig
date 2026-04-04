@@ -168,6 +168,7 @@ pub const Config = struct {
     runtime: RuntimeConfig = .{},
     reliability: ReliabilityConfig = .{},
     scheduler: SchedulerConfig = .{},
+    messages: config_types.MessagesConfig = .{},
     agent: AgentConfig = .{},
     heartbeat: HeartbeatConfig = .{},
     cron: CronConfig = .{},
@@ -328,6 +329,15 @@ pub const Config = struct {
             if (provider_names.providerNamesMatch(e.name, name)) return e.api_mode;
         }
         return .chat_completions;
+    }
+
+    /// Look up whether this provider should set
+    /// `chat_template_kwargs.enable_thinking` from `reasoning_effort`.
+    pub fn getProviderChatTemplateEnableThinkingParam(self: *const Config, name: []const u8) bool {
+        for (self.providers) |e| {
+            if (provider_names.providerNamesMatch(e.name, name)) return e.chat_template_enable_thinking_param;
+        }
+        return false;
     }
 
     /// Look up the optional streaming prompt byte limit for a provider.
@@ -898,6 +908,13 @@ pub const Config = struct {
                         has_field = true;
                     }
                 }
+                if (comptime @hasField(ProviderEntry, "chat_template_enable_thinking_param")) {
+                    if (entry.chat_template_enable_thinking_param) {
+                        if (has_field) try w.print(", ", .{});
+                        try w.print("\"chat_template_enable_thinking_param\": true", .{});
+                        has_field = true;
+                    }
+                }
                 if (comptime @hasField(ProviderEntry, "max_streaming_prompt_bytes")) {
                     if (entry.max_streaming_prompt_bytes) |mb| {
                         if (has_field) try w.print(", ", .{});
@@ -1077,6 +1094,7 @@ pub const Config = struct {
         // Reliability
         try self.writeReliabilitySection(w, &store);
         try w.print("  \"scheduler\": {f},\n", .{std.json.fmt(self.scheduler, .{})});
+        try w.print("  \"messages\": {f},\n", .{std.json.fmt(self.messages, .{})});
         try w.print("  \"agent\": {f},\n", .{std.json.fmt(.{
             .compact_context = self.agent.compact_context,
             .max_tool_iterations = self.agent.max_tool_iterations,
@@ -2254,6 +2272,7 @@ test "save roundtrip preserves extended config sections" {
     cfg.scheduler.max_tasks = 32;
     cfg.scheduler.max_concurrent = 2;
     cfg.scheduler.agent_timeout_secs = 123;
+    cfg.messages.inbound.debounce_ms = 1500;
 
     cfg.agent.compact_context = true;
     cfg.agent.max_tool_iterations = 7;
@@ -2387,6 +2406,7 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expectEqualStrings("docker", loaded.runtime.kind);
     try std.testing.expectEqual(@as(u32, 32), loaded.scheduler.max_tasks);
     try std.testing.expectEqual(@as(u64, 123), loaded.scheduler.agent_timeout_secs);
+    try std.testing.expectEqual(@as(u32, 1500), loaded.messages.inbound.debounce_ms);
     try std.testing.expect(loaded.agent.parallel_tools);
     try std.testing.expect(!loaded.agent.status_show_emojis);
     try std.testing.expectEqualStrings("UTC+08:00", loaded.agent.timezone);
@@ -3311,6 +3331,16 @@ test "json parse scheduler section" {
     try std.testing.expectEqual(@as(u32, 128), cfg.scheduler.max_tasks);
     try std.testing.expectEqual(@as(u32, 8), cfg.scheduler.max_concurrent);
     try std.testing.expectEqual(@as(u64, 600), cfg.scheduler.agent_timeout_secs);
+}
+
+test "json parse messages section reads inbound debounce config" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"messages": {"inbound": {"debounce_ms": 1500}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(u32, 1500), cfg.messages.inbound.debounce_ms);
 }
 
 test "json parse agent section" {
@@ -4622,6 +4652,27 @@ test "parseJson reads max_streaming_prompt_bytes from provider config" {
     try std.testing.expectEqual(@as(?usize, null), cfg.getProviderMaxStreamingPromptBytes("unknown"));
 }
 
+test "parseJson reads chat_template_enable_thinking_param from provider config" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"models":{"providers":{"custom:https://example.com/v1":{"api_key":"sk-test","chat_template_enable_thinking_param":true}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    defer {
+        for (cfg.providers) |e| {
+            allocator.free(e.name);
+            if (e.api_key) |k| allocator.free(k);
+            if (e.base_url) |b| allocator.free(b);
+            if (e.user_agent) |ua| allocator.free(ua);
+        }
+        allocator.free(cfg.providers);
+    }
+
+    try std.testing.expect(cfg.getProviderChatTemplateEnableThinkingParam("custom:https://example.com/v1"));
+    try std.testing.expect(!cfg.getProviderChatTemplateEnableThinkingParam("custom:https://other.example/v1"));
+}
+
 test "parseJson ignores negative max_streaming_prompt_bytes" {
     // A negative integer in the JSON should not crash and should leave the
     // field at its default (null).
@@ -4731,6 +4782,34 @@ test "save writes provider api_mode when responses" {
     defer allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "\"api_mode\": \"responses\"") != null);
+}
+
+test "save writes chat_template_enable_thinking_param when true" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.providers = &.{
+        .{ .name = "custom:https://example.com/v1", .api_key = "sk-test", .chat_template_enable_thinking_param = true },
+    };
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"chat_template_enable_thinking_param\": true") != null);
 }
 
 test "save and parseJson round-trip max_streaming_prompt_bytes" {
@@ -5001,6 +5080,24 @@ test "getProviderApiMode defaults to chat_completions" {
     };
     try std.testing.expectEqual(config_types.ProviderEntry.ApiMode.responses, cfg.getProviderApiMode("sub2api"));
     try std.testing.expectEqual(config_types.ProviderEntry.ApiMode.chat_completions, cfg.getProviderApiMode("unknown"));
+}
+
+test "getProviderChatTemplateEnableThinkingParam defaults to false" {
+    const entries = [_]ProviderEntry{
+        .{
+            .name = "custom:https://example.com/v1",
+            .api_key = "key",
+            .chat_template_enable_thinking_param = true,
+        },
+    };
+    const cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .providers = &entries,
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expect(cfg.getProviderChatTemplateEnableThinkingParam("custom:https://example.com/v1"));
+    try std.testing.expect(!cfg.getProviderChatTemplateEnableThinkingParam("custom:https://other.example/v1"));
 }
 
 test "audio_media defaults" {
