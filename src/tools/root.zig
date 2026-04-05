@@ -126,6 +126,7 @@ pub const i2c = @import("i2c.zig");
 pub const spi = @import("spi.zig");
 pub const path_security = @import("path_security.zig");
 pub const process_util = @import("process_util.zig");
+pub const calculator = @import("calculator.zig");
 
 // ── Core types ──────────────────────────────────────────────────────
 
@@ -440,6 +441,10 @@ pub fn allTools(
     const it = try allocator.create(image.ImageInfoTool);
     it.* = .{};
     try list.append(allocator, it.tool());
+
+    const calt = try allocator.create(calculator.CalculatorTool);
+    calt.* = .{};
+    try list.append(allocator, calt.tool());
 
     // Memory tools (work gracefully without a backend)
     const mst = try allocator.create(memory_store.MemoryStoreTool);
@@ -881,14 +886,23 @@ test "all tools includes extras when enabled" {
     });
     defer deinitTools(std.testing.allocator, tools);
 
-    try std.testing.expectEqual(@as(usize, 22), tools.len);
+    // Order: shell, file_read, file_write, file_edit, file_append, file_delete,
+    //        file_read_hashed, file_edit_hashed, git, image_info, calculator,
+    //        memory_store, memory_recall, memory_list, memory_forget,
+    //        delegate, schedule, spawn, pushover, http_request, web_search,
+    //        web_fetch, browser = 23
+    try std.testing.expectEqual(@as(usize, 23), tools.len);
 }
 
 test "all tools excludes extras when disabled" {
     const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{});
     defer deinitTools(std.testing.allocator, tools);
 
-    try std.testing.expectEqual(@as(usize, 17), tools.len);
+    // Order: shell, file_read, file_write, file_edit, file_append, file_delete,
+    //        file_read_hashed, file_edit_hashed, git, image_info, calculator,
+    //        memory_store, memory_recall, memory_list, memory_forget,
+    //        delegate, schedule, spawn = 18
+    try std.testing.expectEqual(@as(usize, 18), tools.len);
 }
 
 test "all tools wires shell sandbox by default" {
