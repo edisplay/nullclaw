@@ -381,7 +381,7 @@ WeChat 说明：
 
 规则说明：
 
-- 空 `allow_from` 的行为因渠道而异。对 WeChat 和 Discord 来说，省略或留空会关闭过滤；如果要做私有机器人，请显式填写 ID/OpenID。
+- 空 `allow_from` 的行为因渠道而异。有些渠道（例如 WeChat 和 Discord）会把省略或留空视为“关闭过滤”，而不是“拒绝所有”；如果要做私有机器人，请显式填写 ID/OpenID。
 - `allow_from: ["*"]` 会在基于 allowlist 的渠道上允许所有来源，仅在你明确接受风险时使用。
 
 Telegram forum topics：
