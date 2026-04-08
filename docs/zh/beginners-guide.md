@@ -195,7 +195,7 @@ brew install nullclaw
 
 **Windows：**
 
-从 [NullClaw 发布页](https://github.com/nullclaw/nullclaw/releases) 下载二进制文件，重命名为 `nullclaw.exe`，放到你能找到的地方。
+从 [NullClaw 发布页](https://github.com/nullclaw/nullclaw/releases) 下载 Windows `.zip` 压缩包，解压后将其中的 `nullclaw.exe` 放到你能找到的地方。
 
 **从源码构建（所有平台）：**
 

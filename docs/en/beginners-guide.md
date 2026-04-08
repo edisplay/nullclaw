@@ -195,7 +195,7 @@ brew install nullclaw
 
 **Windows:**
 
-Download the binary from the [NullClaw releases page](https://github.com/nullclaw/nullclaw/releases), rename it to `nullclaw.exe`, and put it somewhere you can find it.
+Download the Windows `.zip` archive from the [NullClaw releases page](https://github.com/nullclaw/nullclaw/releases), extract it, and put the included `nullclaw.exe` somewhere you can find it.
 
 **From source (all platforms):**
 
