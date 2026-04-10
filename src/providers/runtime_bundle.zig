@@ -6,6 +6,7 @@ const Provider = @import("root.zig").Provider;
 const reliable = @import("reliable.zig");
 const router = @import("router.zig");
 const api_key = @import("api_key.zig");
+const provider_names = @import("../provider_names.zig");
 
 const HolderPlan = struct {
     name: []const u8,
@@ -30,9 +31,9 @@ fn routerProviderIndex(
     plans: []const HolderPlan,
     provider_name: []const u8,
 ) ?usize {
-    if (std.mem.eql(u8, default_provider, provider_name)) return 0;
+    if (provider_names.providerNamesMatch(default_provider, provider_name)) return 0;
     for (plans, 0..) |plan, i| {
-        if (std.mem.eql(u8, plan.name, provider_name)) return i + 1;
+        if (provider_names.providerNamesMatch(plan.name, provider_name)) return i + 1;
     }
     return null;
 }
@@ -138,7 +139,7 @@ pub const RuntimeProviderBundle = struct {
             defer route_entries.deinit(allocator);
 
             for (cfg.providers) |provider_cfg| {
-                if (std.mem.eql(u8, provider_cfg.name, cfg.default_provider)) continue;
+                if (provider_names.providerNamesMatch(provider_cfg.name, cfg.default_provider)) continue;
                 if (routerProviderIndex(cfg.default_provider, holder_plans.items, provider_cfg.name) != null) continue;
 
                 const resolved_key = api_key.resolveApiKeyFromConfig(
@@ -655,4 +656,32 @@ test "RuntimeProviderBundle builds router-backed provider when model routes are 
     try std.testing.expectEqual(@as(usize, 2), bundle.router_provider_names.?.len);
     try std.testing.expectEqualStrings("openrouter", bundle.router_provider_names.?[0]);
     try std.testing.expectEqualStrings("groq", bundle.router_provider_names.?[1]);
+}
+
+test "RuntimeProviderBundle reuses alias-matching provider entries for model routes" {
+    var cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+        .default_provider = "azure-openai",
+        .default_model = "hint:azure",
+        .providers = &.{
+            .{
+                .name = "azure",
+                .api_key = "azure-test",
+                .base_url = "https://resource.openai.azure.com/openai/v1",
+            },
+        },
+        .model_routes = &.{
+            .{ .hint = "azure", .provider = "azure_openai", .model = "gpt-4.1" },
+        },
+    };
+
+    var bundle = try RuntimeProviderBundle.init(std.testing.allocator, &cfg);
+    defer bundle.deinit();
+
+    try std.testing.expect(bundle.router_ptr != null);
+    try std.testing.expect(bundle.router_provider_names != null);
+    try std.testing.expectEqual(@as(usize, 1), bundle.router_provider_names.?.len);
+    try std.testing.expectEqualStrings("azure-openai", bundle.router_provider_names.?[0]);
 }

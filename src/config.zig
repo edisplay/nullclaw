@@ -179,6 +179,13 @@ fn namedAgentUsesReservedRootId(agent_name: []const u8) bool {
     return std.mem.eql(u8, agent_routing.normalizeId(&agent_buf, agent_name), "main");
 }
 
+fn isKnownProviderName(providers: []const ProviderEntry, name: []const u8) bool {
+    for (providers) |p| {
+        if (provider_names.providerNamesMatch(p.name, name)) return true;
+    }
+    return false;
+}
+
 // ── Top-level Config ────────────────────────────────────────────
 
 pub const Config = struct {
@@ -1360,6 +1367,7 @@ pub const Config = struct {
         InvalidWebRelayUiTokenTtl,
         InvalidWebRelayTokenTtl,
         ReservedMainAgentName,
+        UnknownAgentProvider,
         InsecurePlaintextSecrets,
     };
 
@@ -1385,6 +1393,9 @@ pub const Config = struct {
         for (self.agents) |agent_cfg| {
             if (namedAgentUsesReservedRootId(agent_cfg.name)) {
                 return ValidationError.ReservedMainAgentName;
+            }
+            if (self.providers.len > 0 and !isKnownProviderName(self.providers, agent_cfg.provider)) {
+                return ValidationError.UnknownAgentProvider;
             }
         }
         if (self.gateway.port == 0) {
@@ -1575,6 +1586,7 @@ pub const Config = struct {
             ValidationError.InvalidWebRelayUiTokenTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_ui_token_ttl_secs must be in [300, 2592000].\n", .{}),
             ValidationError.InvalidWebRelayTokenTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_token_ttl_secs must be in [3600, 31536000].\n", .{}),
             ValidationError.ReservedMainAgentName => std.debug.print("Config error: agents.list names must not normalize to 'main' because that id is reserved for the root agent.\n", .{}),
+            ValidationError.UnknownAgentProvider => std.debug.print("Config error: agents.list[].provider must match a known provider name.\n", .{}),
         }
     }
 
@@ -6792,4 +6804,40 @@ test "NostrConfig dm_relays default is auth.nostr1.com" {
     };
     try std.testing.expectEqual(@as(usize, 1), cfg.dm_relays.len);
     try std.testing.expectEqualStrings("wss://auth.nostr1.com", cfg.dm_relays[0]);
+}
+
+// Regression: named agent provider names must resolve through the same alias-aware
+// provider matching used by config lookups.
+test "validation rejects unknown named agent provider when providers are configured" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .providers = &.{.{ .name = "openai" }},
+        .default_model = "gpt-5.4",
+        .agents = &.{.{
+            .name = "worker",
+            .provider = "nonexistent-provider",
+            .model = "gpt-5.4",
+        }},
+        .allocator = std.testing.allocator,
+    };
+
+    try std.testing.expectError(Config.ValidationError.UnknownAgentProvider, cfg.validate());
+}
+
+test "validation accepts named agent provider aliases from configured providers" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .providers = &.{.{ .name = "azure" }},
+        .default_model = "gpt-5.4",
+        .agents = &.{.{
+            .name = "worker",
+            .provider = "azure-openai",
+            .model = "gpt-5.4",
+        }},
+        .allocator = std.testing.allocator,
+    };
+
+    try cfg.validate();
 }
