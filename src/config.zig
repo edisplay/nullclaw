@@ -554,6 +554,42 @@ pub const Config = struct {
         try writeIndentedMultilineJson(w, pretty, continuation_indent);
     }
 
+    /// Convenience: write `<indent>"<key>": <pretty-value><trailing>` in one call.
+    fn writePrettyField(allocator: std.mem.Allocator, w: *std.Io.Writer, indent: []const u8, key: []const u8, value: anytype, trailing: []const u8) !void {
+        try w.writeAll(indent);
+        try w.print("\"{s}\": ", .{key});
+        try writePrettyJsonInline(allocator, w, value, indent);
+        try w.writeAll(trailing);
+    }
+
+    fn writePrettyStringMap(w: *std.Io.Writer, base_indent: []const u8, entries: anytype) !void {
+        try w.writeAll("{");
+        if (entries.len == 0) {
+            try w.writeAll("}");
+            return;
+        }
+
+        try w.writeAll("\n");
+        for (entries, 0..) |entry, i| {
+            if (i > 0) try w.writeAll(",\n");
+            try w.writeAll(base_indent);
+            try w.writeAll("  ");
+            try writeJsonStr(w, entry.key);
+            try w.writeAll(": ");
+            try writeJsonStr(w, entry.value);
+        }
+        try w.writeAll("\n");
+        try w.writeAll(base_indent);
+        try w.writeAll("}");
+    }
+
+    fn writePrettyStringMapField(w: *std.Io.Writer, indent: []const u8, key: []const u8, entries: anytype, trailing: []const u8) !void {
+        try w.writeAll(indent);
+        try w.print("\"{s}\": ", .{key});
+        try writePrettyStringMap(w, indent, entries);
+        try w.writeAll(trailing);
+    }
+
     fn writeChannelAccounts(allocator: std.mem.Allocator, w: *std.Io.Writer, channel_name: []const u8, accounts: anytype) !void {
         try w.print("    \"{s}\": {{\n      \"accounts\": {{", .{channel_name});
         for (accounts, 0..) |account, i| {
@@ -573,44 +609,38 @@ pub const Config = struct {
     }
 
     fn writeExternalTransport(self: *const Config, w: *std.Io.Writer, transport: ExternalChannelConfig.TransportConfig) !void {
-        _ = self;
-        try w.print("{{\"command\": {f}", .{std.json.fmt(transport.command, .{})});
-
+        try w.writeAll("{\n");
+        try writePrettyField(self.allocator, w, "            ", "command", transport.command, "");
         if (transport.args.len > 0) {
-            try w.print(", \"args\": {f}", .{std.json.fmt(transport.args, .{})});
+            try w.writeAll(",\n");
+            try writePrettyField(self.allocator, w, "            ", "args", transport.args, "");
         }
         if (transport.env.len > 0) {
-            try w.print(", \"env\": {{", .{});
-            for (transport.env, 0..) |entry, index| {
-                if (index > 0) try w.print(", ", .{});
-                try w.print("{f}: {f}", .{
-                    std.json.fmt(entry.key, .{}),
-                    std.json.fmt(entry.value, .{}),
-                });
-            }
-            try w.print("}}", .{});
+            try w.writeAll(",\n");
+            try writePrettyStringMapField(w, "            ", "env", transport.env, "");
         }
         if (transport.timeout_ms != 10_000) {
-            try w.print(", \"timeout_ms\": {d}", .{transport.timeout_ms});
+            try w.writeAll(",\n");
+            try writePrettyField(self.allocator, w, "            ", "timeout_ms", transport.timeout_ms, "");
         }
-        try w.print("}}", .{});
+        try w.writeAll("\n          }");
     }
 
     fn writeExternalChannelAccount(self: *const Config, w: *std.Io.Writer, account: ExternalChannelConfig) !void {
-        try w.print("{{\"runtime_name\": {f}, \"transport\": ", .{
-            std.json.fmt(account.runtime_name, .{}),
-        });
+        try w.writeAll("{\n");
+        try writePrettyField(self.allocator, w, "          ", "runtime_name", account.runtime_name, ",\n");
+        try w.writeAll("          \"transport\": ");
         try self.writeExternalTransport(w, account.transport);
-
-        try w.print(", \"config\": ", .{});
+        try w.writeAll(",\n");
+        try w.writeAll("          \"config\": ");
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, account.plugin_config_json, .{}) catch {
-            try w.print("{f}", .{std.json.fmt(account.plugin_config_json, .{})});
-            try w.print("}}", .{});
+            try writePrettyJsonInline(self.allocator, w, account.plugin_config_json, "          ");
+            try w.writeAll("\n        }");
             return;
         };
         defer parsed.deinit();
-        try writePrettyJsonInline(self.allocator, w, parsed.value, "");
-        try w.print("}}", .{});
+        try writePrettyJsonInline(self.allocator, w, parsed.value, "          ");
+        try w.writeAll("\n        }");
     }
 
     fn writeExternalChannelAccounts(self: *const Config, w: *std.Io.Writer, accounts: []const ExternalChannelConfig) !void {
@@ -754,14 +784,9 @@ pub const Config = struct {
         try writeStringArray(w, encrypted_api_keys);
         try w.print(",\n", .{});
 
-        try w.print("    \"model_fallbacks\": [", .{});
-        for (self.reliability.model_fallbacks, 0..) |entry, i| {
-            if (i > 0) try w.print(", ", .{});
-            try w.print("{{\"model\": \"{s}\", \"fallbacks\": ", .{entry.model});
-            try writeStringArray(w, entry.fallbacks);
-            try w.print("}}", .{});
-        }
-        try w.print("]\n", .{});
+        try w.print("    \"model_fallbacks\": ", .{});
+        try writePrettyJsonInline(self.allocator, w, self.reliability.model_fallbacks, "    ");
+        try w.print("\n", .{});
         try w.print("  }},\n", .{});
     }
 
@@ -772,56 +797,69 @@ pub const Config = struct {
 
             var wrote_field = false;
             if (!std.mem.eql(u8, server.transport, McpServerConfig.DEFAULT_TRANSPORT)) {
-                try w.print("\"transport\": {f}", .{std.json.fmt(server.transport, .{})});
+                try w.writeAll("\n");
+                try writePrettyField(self.allocator, w, "      ", "transport", server.transport, "");
                 wrote_field = true;
             }
             if (server.command.len > 0) {
-                if (wrote_field) try w.print(", ", .{});
-                try w.print("\"command\": {f}", .{std.json.fmt(server.command, .{})});
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
+                }
+                try writePrettyField(self.allocator, w, "      ", "command", server.command, "");
                 wrote_field = true;
             }
             if (server.url) |url| {
-                if (wrote_field) try w.print(", ", .{});
-                try w.print("\"url\": {f}", .{std.json.fmt(url, .{})});
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
+                }
+                try writePrettyField(self.allocator, w, "      ", "url", url, "");
                 wrote_field = true;
             }
             if (server.timeout_ms != 10_000) {
-                if (wrote_field) try w.print(", ", .{});
-                try w.print("\"timeout_ms\": {d}", .{server.timeout_ms});
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
+                }
+                try writePrettyField(self.allocator, w, "      ", "timeout_ms", server.timeout_ms, "");
                 wrote_field = true;
             }
             if (server.args.len > 0) {
-                if (wrote_field) try w.print(", ", .{});
-                try w.print("\"args\": {f}", .{std.json.fmt(server.args, .{})});
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
+                }
+                try writePrettyField(self.allocator, w, "      ", "args", server.args, "");
                 wrote_field = true;
             }
             if (server.env.len > 0) {
-                if (wrote_field) try w.print(", ", .{});
-                try w.print("\"env\": {{", .{});
-                for (server.env, 0..) |entry, env_i| {
-                    if (env_i > 0) try w.print(", ", .{});
-                    try w.print("{f}: {f}", .{
-                        std.json.fmt(entry.key, .{}),
-                        std.json.fmt(entry.value, .{}),
-                    });
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
                 }
-                try w.print("}}", .{});
+                try writePrettyStringMapField(w, "      ", "env", server.env, "");
                 wrote_field = true;
             }
             if (server.headers.len > 0) {
-                if (wrote_field) try w.print(", ", .{});
-                try w.print("\"headers\": {{", .{});
-                for (server.headers, 0..) |entry, hdr_i| {
-                    if (hdr_i > 0) try w.print(", ", .{});
-                    try w.print("{f}: {f}", .{
-                        std.json.fmt(entry.key, .{}),
-                        std.json.fmt(entry.value, .{}),
-                    });
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
                 }
-                try w.print("}}", .{});
+                try writePrettyStringMapField(w, "      ", "headers", server.headers, "");
                 wrote_field = true;
             }
-            try w.print("}}", .{});
+            if (wrote_field) {
+                try w.writeAll("\n    }");
+            } else {
+                try w.writeAll("}");
+            }
             if (i + 1 < self.mcp_servers.len) try w.print(",", .{});
             try w.print("\n", .{});
         }
@@ -999,7 +1037,7 @@ pub const Config = struct {
                     if (route.api_key) |value| self.allocator.free(value);
                 }
             }
-            try w.print("  \"model_routes\": {f},\n", .{std.json.fmt(serialized_routes, .{})});
+            try writePrettyField(self.allocator, w, "  ", "model_routes", serialized_routes, ",\n");
         }
 
         // agents.defaults (model + heartbeat) + agents.list
@@ -1079,7 +1117,7 @@ pub const Config = struct {
                     if (wrote_agent_field) {
                         try w.print(",\n", .{});
                     }
-                    try w.print("    \"list\": {f}\n", .{std.json.fmt(serialized_agents, .{})});
+                    try writePrettyField(self.allocator, w, "    ", "list", serialized_agents, "\n");
                 } else {
                     try w.print("\n", .{});
                 }
@@ -1088,7 +1126,7 @@ pub const Config = struct {
         }
 
         if (self.agent_bindings.len > 0) {
-            try w.print("  \"bindings\": {f},\n", .{std.json.fmt(self.agent_bindings, .{})});
+            try writePrettyField(self.allocator, w, "  ", "bindings", self.agent_bindings, ",\n");
         }
         if (self.mcp_servers.len > 0) {
             try self.writeMcpServersSection(w);
@@ -1135,8 +1173,8 @@ pub const Config = struct {
         }
         try w.print("\n  }},\n", .{});
 
-        try w.print("  \"autonomy\": {f},\n", .{std.json.fmt(self.autonomy, .{})});
-        try w.print("  \"runtime\": {f},\n", .{std.json.fmt(.{
+        try writePrettyField(self.allocator, w, "  ", "autonomy", self.autonomy, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "runtime", .{
             .kind = self.runtime.kind,
             .docker = .{
                 .image = self.runtime.docker.image,
@@ -1145,13 +1183,13 @@ pub const Config = struct {
                 .read_only_rootfs = self.runtime.docker.read_only_rootfs,
                 .mount_workspace = self.runtime.docker.mount_workspace,
             },
-        }, .{})});
+        }, ",\n");
 
         // Reliability
         try self.writeReliabilitySection(w, &store);
-        try w.print("  \"scheduler\": {f},\n", .{std.json.fmt(self.scheduler, .{})});
-        try w.print("  \"messages\": {f},\n", .{std.json.fmt(self.messages, .{})});
-        try w.print("  \"agent\": {f},\n", .{std.json.fmt(.{
+        try writePrettyField(self.allocator, w, "  ", "scheduler", self.scheduler, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "messages", self.messages, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "agent", .{
             .compact_context = self.agent.compact_context,
             .max_tool_iterations = self.agent.max_tool_iterations,
             .max_history_messages = self.agent.max_history_messages,
@@ -1166,7 +1204,7 @@ pub const Config = struct {
             .timezone = self.agent.timezone,
             .vision_disabled_models = self.agent.vision_disabled_models,
             .auto_disable_vision_on_error = self.agent.auto_disable_vision_on_error,
-        }, .{})});
+        }, ",\n");
 
         // Channels
         try self.writeChannelsSection(w);
@@ -1184,10 +1222,10 @@ pub const Config = struct {
         defer if (serialized_memory.api.api_key.ptr != self.memory.api.api_key.ptr) {
             self.allocator.free(serialized_memory.api.api_key);
         };
-        try w.print("  \"memory\": {f},\n", .{std.json.fmt(serialized_memory, .{})});
-        try w.print("  \"gateway\": {f},\n", .{std.json.fmt(self.gateway, .{})});
-        try w.print("  \"a2a\": {f},\n", .{std.json.fmt(self.a2a, .{})});
-        try w.print("  \"tunnel\": {f},\n", .{std.json.fmt(self.tunnel, .{})});
+        try writePrettyField(self.allocator, w, "  ", "memory", serialized_memory, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "gateway", self.gateway, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "a2a", self.a2a, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "tunnel", self.tunnel, ",\n");
         var serialized_composio = self.composio;
         if (serialized_composio.api_key) |api_key| {
             serialized_composio.api_key = try store.encryptSecret(self.allocator, api_key);
@@ -1197,9 +1235,9 @@ pub const Config = struct {
                 self.allocator.free(api_key);
             }
         };
-        try w.print("  \"composio\": {f},\n", .{std.json.fmt(serialized_composio, .{})});
-        try w.print("  \"secrets\": {f},\n", .{std.json.fmt(self.secrets, .{})});
-        try w.print("  \"browser\": {f},\n", .{std.json.fmt(.{
+        try writePrettyField(self.allocator, w, "  ", "composio", serialized_composio, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "secrets", self.secrets, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "browser", .{
             .enabled = self.browser.enabled,
             .session_name = self.browser.session_name,
             .backend = self.browser.backend,
@@ -1207,8 +1245,8 @@ pub const Config = struct {
             .native_webdriver_url = self.browser.native_webdriver_url,
             .native_chrome_path = self.browser.native_chrome_path,
             .allowed_domains = self.browser.allowed_domains,
-        }, .{})});
-        try w.print("  \"http_request\": {f},\n", .{std.json.fmt(.{
+        }, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "http_request", .{
             .enabled = self.http_request.enabled,
             .max_response_size = self.http_request.max_response_size,
             .timeout_secs = self.http_request.timeout_secs,
@@ -1217,10 +1255,10 @@ pub const Config = struct {
             .search_base_url = self.http_request.search_base_url,
             .search_provider = self.http_request.search_provider,
             .search_fallback_providers = self.http_request.search_fallback_providers,
-        }, .{})});
-        try w.print("  \"identity\": {f},\n", .{std.json.fmt(self.identity, .{})});
-        try w.print("  \"cost\": {f},\n", .{std.json.fmt(self.cost, .{})});
-        try w.print("  \"security\": {f},\n", .{std.json.fmt(.{
+        }, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "identity", self.identity, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "cost", self.cost, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "security", .{
             .sandbox = .{
                 .enabled = self.security.sandbox.enabled,
                 .backend = self.security.sandbox.backend,
@@ -1237,11 +1275,11 @@ pub const Config = struct {
                 .max_size_mb = self.security.audit.max_size_mb,
                 .sign_events = self.security.audit.sign_events,
             },
-        }, .{})});
-        try w.print("  \"peripherals\": {f},\n", .{std.json.fmt(.{
+        }, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "peripherals", .{
             .enabled = self.peripherals.enabled,
             .datasheet_dir = self.peripherals.datasheet_dir,
-        }, .{})});
+        }, ",\n");
 
         // Tools (with media.audio)
         try w.print("  \"tools\": {{\n", .{});
@@ -1249,7 +1287,8 @@ pub const Config = struct {
         try w.print("    \"shell_max_output_bytes\": {d},\n", .{self.tools.shell_max_output_bytes});
         try w.print("    \"max_file_size_bytes\": {d},\n", .{self.tools.max_file_size_bytes});
         try w.print("    \"web_fetch_max_chars\": {d},\n", .{self.tools.web_fetch_max_chars});
-        try w.print("    \"path_env_vars\": {f}", .{std.json.fmt(self.tools.path_env_vars, .{})});
+        try w.print("    \"path_env_vars\": ", .{});
+        try writePrettyJsonInline(self.allocator, w, self.tools.path_env_vars, "    ");
         // tools.media.audio
         {
             const am = self.audio_media;
@@ -1272,8 +1311,8 @@ pub const Config = struct {
         }
         try w.print("\n  }},\n", .{});
 
-        try w.print("  \"hardware\": {f},\n", .{std.json.fmt(self.hardware, .{})});
-        try w.print("  \"session\": {f}\n", .{std.json.fmt(self.session, .{})});
+        try writePrettyField(self.allocator, w, "  ", "hardware", self.hardware, ",\n");
+        try writePrettyField(self.allocator, w, "  ", "session", self.session, "\n");
 
         try w.print("}}\n", .{});
         try w.flush();
@@ -2036,10 +2075,13 @@ test "save roundtrip preserves external channel config" {
     defer allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "\"external\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"runtime_name\": \"whatsapp_web\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"transport\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"command\": \"nullclaw-plugin-whatsapp-web\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"config\": {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "        \"main\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "          \"runtime_name\": \"whatsapp_web\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "          \"transport\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "            \"command\": \"nullclaw-plugin-whatsapp-web\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "            \"env\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "              \"TOKEN\": \"secret\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "          \"config\": {\n") != null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -2200,6 +2242,10 @@ test "save roundtrip preserves reliability settings" {
     defer file.close();
     const content = try file.readToEndAlloc(allocator, 128 * 1024);
     defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "    \"model_fallbacks\": [\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "        \"model\": \"gpt-5.3-codex\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "        \"fallbacks\": [\n") != null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -2566,6 +2612,13 @@ test "save escapes mcp_servers strings safely" {
     const content = try file.readToEndAlloc(allocator, 128 * 1024);
     defer allocator.free(content);
 
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"mcp_servers\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "    \"ctx\\\"7\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "      \"command\": \"npx \\\"@scope/pkg\\\"\\nrun\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "      \"args\": [\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "      \"env\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "        \"OPEN\\\"KEY\": \"ab\\\\cd\\\"ef\\nz\"") != null);
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var loaded = Config{
@@ -2585,6 +2638,62 @@ test "save escapes mcp_servers strings safely" {
     try std.testing.expectEqual(@as(usize, 1), loaded.mcp_servers[0].env.len);
     try std.testing.expectEqualStrings("OPEN\"KEY", loaded.mcp_servers[0].env[0].key);
     try std.testing.expectEqualStrings("ab\\cd\"ef\nz", loaded.mcp_servers[0].env[0].value);
+}
+
+test "save outputs pretty-printed nested sections" {
+    // Regression: issue #765 — onboard --interactive generated minified config.json
+    // because nested sections used compact std.json.fmt. Verify indentation is present.
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{base});
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.security.sandbox.enabled = true;
+    cfg.security.audit.enabled = true;
+    cfg.agent.compact_context = true;
+    cfg.agent.max_tool_iterations = 42;
+    try cfg.save();
+
+    const file = try std.fs.openFileAbsolute(config_path, .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(allocator, 256 * 1024);
+    defer allocator.free(content);
+
+    // Top-level keys must be indented at 2 spaces
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"security\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"agent\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"autonomy\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"gateway\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"memory\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "  \"session\": {\n") != null);
+
+    // Nested keys must be indented at 4 spaces (inside top-level objects)
+    try std.testing.expect(std.mem.indexOf(u8, content, "    \"sandbox\": {\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "      \"enabled\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "    \"max_tool_iterations\": 42") != null);
+
+    // Roundtrip: values must survive parse
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var loaded = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = arena.allocator(),
+    };
+    try loaded.parseJson(content);
+    try std.testing.expect(loaded.security.sandbox.enabled orelse false);
+    try std.testing.expect(loaded.security.audit.enabled);
+    try std.testing.expect(loaded.agent.compact_context);
+    try std.testing.expectEqual(@as(u32, 42), loaded.agent.max_tool_iterations);
 }
 
 test "syncFlatFields propagates nested values" {
@@ -4013,6 +4122,35 @@ test "parse agents.defaults.model.primary custom provider supports versioned pat
     try std.testing.expectEqualStrings("minimaxai/minimax-m2.1", cfg.default_model.?);
 }
 
+test "parse agents.defaults.model.primary matches configured cloudflare custom provider key" {
+    // Regression: issue #721 Cloudflare AI refs append "@cf/..." after a configured custom provider URL.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{
+        \\  "models": {
+        \\    "providers": {
+        \\      "custom:https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1": {
+        \\        "base_url": "https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1"
+        \\      }
+        \\    }
+        \\  },
+        \\  "agents": {
+        \\    "defaults": {
+        \\      "model": {
+        \\        "primary": "custom:https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1/@cf/google/gemma-3-12b-it"
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("custom:https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1", cfg.default_provider);
+    try std.testing.expectEqualStrings("@cf/google/gemma-3-12b-it", cfg.default_model.?);
+}
+
 test "parse agents.defaults.model supports explicit provider field" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4238,6 +4376,41 @@ test "parse agents.list primary model ref without provider field" {
     try std.testing.expectEqualStrings("coder", cfg.agents[0].name);
     try std.testing.expectEqualStrings("ollama", cfg.agents[0].provider);
     try std.testing.expectEqualStrings("qwen3.5:cloud", cfg.agents[0].model);
+}
+
+test "parse agents.list primary model ref matches configured cloudflare custom provider key" {
+    // Regression: issue #721 must also preserve Cloudflare-style refs for named agents.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{
+        \\  "models": {
+        \\    "providers": {
+        \\      "custom:https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1": {
+        \\        "base_url": "https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1"
+        \\      }
+        \\    }
+        \\  },
+        \\  "agents": {
+        \\    "list": [
+        \\      {
+        \\        "id": "coder",
+        \\        "model": {
+        \\          "primary": "custom:https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1/@cf/google/gemma-3-12b-it"
+        \\        }
+        \\      }
+        \\    ]
+        \\  }
+        \\}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    defer freeNamedAgentSlice(allocator, cfg.agents);
+    try std.testing.expectEqual(@as(usize, 1), cfg.agents.len);
+    try std.testing.expectEqualStrings("coder", cfg.agents[0].name);
+    try std.testing.expectEqualStrings("custom:https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1", cfg.agents[0].provider);
+    try std.testing.expectEqualStrings("@cf/google/gemma-3-12b-it", cfg.agents[0].model);
 }
 
 test "parse agents.list with workspace_path" {
