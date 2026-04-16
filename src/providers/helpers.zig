@@ -599,6 +599,28 @@ pub fn convertToolsAnthropic(buf: *std.ArrayListUnmanaged(u8), allocator: std.me
     try buf.append(allocator, ']');
 }
 
+/// Serialize tool definitions into a Responses-API-format JSON array, appending directly into `buf`.
+/// Format: [{"type":"function","name":"...","description":"...","parameters":{...}}]
+/// Note: flat format — no nested "function" wrapper (unlike OpenAI format).
+pub fn convertToolsResponses(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, tools: []const ToolSpec) !void {
+    if (tools.len == 0) {
+        try buf.appendSlice(allocator, "[]");
+        return;
+    }
+    try buf.append(allocator, '[');
+    for (tools, 0..) |tool, i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"type\":\"function\",\"name\":");
+        try json_util.appendJsonString(buf, allocator, tool.name);
+        try buf.appendSlice(allocator, ",\"description\":");
+        try json_util.appendJsonString(buf, allocator, tool.description);
+        try buf.appendSlice(allocator, ",\"parameters\":");
+        try buf.appendSlice(allocator, tool.parameters_json);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+}
+
 /// HTTP POST with optional LLM timeout (seconds). 0 = no limit.
 /// Automatically reads proxy from HTTPS_PROXY, HTTP_PROXY, or ALL_PROXY environment variables.
 pub fn curlPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []const u8, headers: []const []const u8, timeout_secs: u64) ![]u8 {
@@ -736,6 +758,50 @@ test "convertToolsAnthropic empty tools" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
     try convertToolsAnthropic(&buf, alloc, &.{});
+    try std.testing.expectEqualStrings("[]", buf.items);
+}
+
+test "convertToolsResponses produces flat format" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    const tools = &[_]ToolSpec{
+        .{
+            .name = "shell",
+            .description = "Run a shell command",
+            .parameters_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}}}",
+        },
+        .{
+            .name = "file_read",
+            .description = "Read a file",
+            .parameters_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}",
+        },
+    };
+    try convertToolsResponses(&buf, alloc, tools);
+    const json = buf.items;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const arr = parsed.value.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.items.len);
+
+    // Verify flat format: "name" at top level, no nested "function" key
+    const t0 = arr.items[0].object;
+    try std.testing.expectEqualStrings("function", t0.get("type").?.string);
+    try std.testing.expect(t0.get("function") == null); // Must NOT have nested "function"
+    try std.testing.expectEqualStrings("shell", t0.get("name").?.string);
+    try std.testing.expectEqualStrings("Run a shell command", t0.get("description").?.string);
+    try std.testing.expect(t0.get("parameters").? == .object);
+
+    const t1 = arr.items[1].object;
+    try std.testing.expectEqualStrings("file_read", t1.get("name").?.string);
+}
+
+test "convertToolsResponses empty tools" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    try convertToolsResponses(&buf, alloc, &.{});
     try std.testing.expectEqualStrings("[]", buf.items);
 }
 

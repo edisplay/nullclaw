@@ -548,7 +548,7 @@ pub const OpenAiCompatibleProvider = struct {
         if (request.tools) |tools| {
             if (tools.len > 0) {
                 try buf.appendSlice(allocator, ",\"tools\":");
-                try root.convertToolsOpenAI(&buf, allocator, tools);
+                try root.convertToolsResponses(&buf, allocator, tools);
                 try buf.appendSlice(allocator, ",\"tool_choice\":\"auto\"");
             }
         }
@@ -2696,6 +2696,9 @@ test "buildResponsesRequestBody includes tools and tool results" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"function_call_output\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "call_123") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tools\"") != null);
+    // Verify flat tool schema: "name" at top level, no nested "function" wrapper
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"function\",\"name\":\"bash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"function\":{\"name\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_choice\":\"auto\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"max_output_tokens\":512") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning\":{\"effort\":\"medium\"}") != null);
@@ -2790,6 +2793,25 @@ test "parseResponsesResponse maps generic error envelope" {
         \\{"error":{"message":"An error occurred while processing your request."}}
     ;
     try std.testing.expectError(error.ApiError, OpenAiCompatibleProvider.parseResponsesResponse(std.testing.allocator, body));
+}
+
+test "parseResponsesResponse handles error:null without returning error" {
+    const body =
+        \\{"error":null,"output":[{"role":"assistant","content":[{"text":"Hello"}]}]}
+    ;
+    const result = try OpenAiCompatibleProvider.parseResponsesResponse(std.testing.allocator, body);
+    defer {
+        if (result.content) |t| std.testing.allocator.free(t);
+        for (result.tool_calls) |tc| {
+            std.testing.allocator.free(tc.id);
+            std.testing.allocator.free(tc.name);
+            std.testing.allocator.free(tc.arguments);
+        }
+        std.testing.allocator.free(result.tool_calls);
+        if (result.model.len > 0) std.testing.allocator.free(result.model);
+        if (result.reasoning_content) |t| std.testing.allocator.free(t);
+    }
+    try std.testing.expectEqualStrings("Hello", result.content.?);
 }
 
 test "AuthStyle custom headerName fallback" {
