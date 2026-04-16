@@ -11,6 +11,7 @@ const log = std.log.scoped(.agent);
 const providers = @import("../providers/root.zig");
 const config_types = @import("../config_types.zig");
 const path_prefix = @import("../path_prefix.zig");
+const util = @import("../util.zig");
 const Provider = providers.Provider;
 const ChatMessage = providers.ChatMessage;
 const bootstrap_mod = @import("../bootstrap/root.zig");
@@ -125,7 +126,7 @@ pub fn autoCompactHistory(
 
         // Truncate if too long
         if (merged.len > config.max_summary_chars) {
-            const truncated = try allocator.dupe(u8, merged[0..config.max_summary_chars]);
+            const truncated = try allocator.dupe(u8, util.truncateUtf8(merged, config.max_summary_chars));
             allocator.free(merged);
             break :blk truncated;
         }
@@ -255,7 +256,7 @@ fn buildCompactionTranscript(
         try buf.appendSlice(allocator, role_str);
         try buf.appendSlice(allocator, ": ");
         // Truncate very long messages in transcript
-        const content = if (msg.content.len > 500) msg.content[0..500] else msg.content;
+        const content = if (msg.content.len > 500) util.truncateUtf8(msg.content, 500) else msg.content;
         try buf.appendSlice(allocator, content);
         try buf.append(allocator, '\n');
 
@@ -264,7 +265,7 @@ fn buildCompactionTranscript(
     }
 
     if (buf.items.len > max_source_chars) {
-        buf.items.len = max_source_chars;
+        buf.items.len = util.truncateUtf8(buf.items, max_source_chars).len;
     }
 
     return buf.toOwnedSlice(allocator);
@@ -308,7 +309,7 @@ fn summarizeSlice(
     ) catch {
         // Fallback: use a local truncation of the transcript
         const max_len = @min(transcript.len, config.max_summary_chars);
-        return try allocator.dupe(u8, transcript[0..max_len]);
+        return try allocator.dupe(u8, util.truncateUtf8(transcript, max_len));
     };
     // Free response's heap-allocated fields after extracting what we need
     defer {
@@ -330,7 +331,7 @@ fn summarizeSlice(
 
     const raw_summary = summary_resp.contentOrEmpty();
     const max_len = @min(raw_summary.len, config.max_summary_chars);
-    return try allocator.dupe(u8, raw_summary[0..max_len]);
+    return try allocator.dupe(u8, util.truncateUtf8(raw_summary, max_len));
 }
 
 const HeadingInfo = struct {
@@ -496,7 +497,7 @@ fn readWorkspaceContextForSummary(
             if (sections.len == 0) return try allocator.dupe(u8, "");
 
             const safe_content = if (sections.len > MAX_WORKSPACE_CONTEXT_CHARS)
-                try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{sections[0..MAX_WORKSPACE_CONTEXT_CHARS]})
+                try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{util.truncateUtf8(sections, MAX_WORKSPACE_CONTEXT_CHARS)})
             else
                 try allocator.dupe(u8, sections);
             defer allocator.free(safe_content);
@@ -523,7 +524,7 @@ fn readWorkspaceContextForSummary(
     if (sections.len == 0) return try allocator.dupe(u8, "");
 
     const safe_content = if (sections.len > MAX_WORKSPACE_CONTEXT_CHARS)
-        try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{sections[0..MAX_WORKSPACE_CONTEXT_CHARS]})
+        try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{util.truncateUtf8(sections, MAX_WORKSPACE_CONTEXT_CHARS)})
     else
         try allocator.dupe(u8, sections);
     defer allocator.free(safe_content);
@@ -817,4 +818,25 @@ test "readWorkspaceContextForSummary blocks AGENTS symlink escape" {
     defer std.testing.allocator.free(context);
 
     try std.testing.expectEqual(@as(usize, 0), context.len);
+}
+
+test "buildCompactionTranscript keeps UTF-8 valid when truncating long message content" {
+    const allocator = std.testing.allocator;
+    const prefix = try allocator.alloc(u8, 499);
+    defer allocator.free(prefix);
+    @memset(prefix, 'a');
+
+    // Regression: the 500-byte message cap must not split the emoji below.
+    const content = try std.fmt.allocPrint(allocator, "{s}\xf0\x9f\x98\x80tail", .{prefix});
+    defer allocator.free(content);
+
+    const history = [_]OwnedMessage{
+        .{ .role = .user, .content = content },
+    };
+
+    const transcript = try buildCompactionTranscript(allocator, &history, 0, history.len, 4_096);
+    defer allocator.free(transcript);
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(transcript));
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "tail") == null);
 }

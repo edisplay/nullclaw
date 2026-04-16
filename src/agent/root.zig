@@ -27,6 +27,7 @@ const observability = @import("../observability.zig");
 const Observer = observability.Observer;
 const ObserverEvent = observability.ObserverEvent;
 const SecurityPolicy = @import("../security/policy.zig").SecurityPolicy;
+const util = @import("../util.zig");
 const verbose_mod = @import("../verbose.zig");
 
 const cache = memory_mod.cache;
@@ -2772,14 +2773,22 @@ pub const Agent = struct {
     const LLM_LOG_MAX_BYTES: usize = 8192;
 
     fn previewText(text: []const u8, max_bytes: usize) TextPreview {
-        if (text.len <= max_bytes) {
-            return .{ .slice = text, .truncated = false };
-        }
-        return .{ .slice = text[0..max_bytes], .truncated = true };
+        const preview = util.previewUtf8(text, max_bytes);
+        return .{
+            .slice = preview.slice,
+            .truncated = preview.truncated,
+        };
     }
 
     fn llmLogPreview(text: []const u8) TextPreview {
         return previewText(text, LLM_LOG_MAX_BYTES);
+    }
+
+    test "previewText keeps UTF-8 intact when truncating" {
+        const preview = previewText("aaa\xd0\x99tail", 4);
+        try std.testing.expectEqualStrings("aaa", preview.slice);
+        try std.testing.expect(preview.truncated);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(preview.slice));
     }
 
     fn llmRequestObserverDetail(buf: []u8, messages: []const ChatMessage) ?[]const u8 {

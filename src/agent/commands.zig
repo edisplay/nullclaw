@@ -21,6 +21,7 @@ const model_refs = @import("../model_refs.zig");
 const provider_names = @import("../provider_names.zig");
 const version = @import("../version.zig");
 const command_summary = @import("../command_summary.zig");
+const util = @import("../util.zig");
 const log = std.log.scoped(.agent);
 
 const SlashCommand = control_plane.SlashCommand;
@@ -4432,9 +4433,8 @@ fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
                 try w.print(" vector_score=n/a", .{});
             }
             try w.print(" source={s}\n", .{c.source});
-            const preview_len = @min(@as(usize, 140), c.snippet.len);
-            const preview = c.snippet[0..preview_len];
-            try w.print("     {s}{s}\n", .{ preview, if (c.snippet.len > preview_len) "..." else "" });
+            const preview = util.previewUtf8(c.snippet, 140);
+            try w.print("     {s}{s}\n", .{ preview.slice, if (preview.truncated) "..." else "" });
         }
         out = out_writer.toArrayList();
         return try out.toOwnedSlice(self.allocator);
@@ -4488,10 +4488,9 @@ fn handleMemoryCommand(self: anytype, arg: []const u8) ![]const u8 {
         for (entries) |e| {
             if (!include_internal and isInternalMemoryEntryKeyOrContent(e.key, e.content)) continue;
             if (written >= shown) break;
-            const preview_len = @min(@as(usize, 120), e.content.len);
-            const preview = e.content[0..preview_len];
+            const preview = util.previewUtf8(e.content, 120);
             try w.print("  {d}. {s} [{s}] {s}\n", .{ written + 1, e.key, e.category.toString(), e.timestamp });
-            try w.print("     {s}{s}\n", .{ preview, if (e.content.len > preview_len) "..." else "" });
+            try w.print("     {s}{s}\n", .{ preview.slice, if (preview.truncated) "..." else "" });
             written += 1;
         }
         out = out_writer.toArrayList();

@@ -14,6 +14,7 @@ const telegram_ingress = @import("telegram_ingress.zig");
 const telegram_update_ingress = @import("telegram_update_ingress.zig");
 const thread_stacks = @import("../thread_stacks.zig");
 const Atomic = @import("../portable_atomic.zig").Atomic;
+const util = @import("../util.zig");
 
 const log = std.log.scoped(.telegram);
 const MEDIA_GROUP_FLUSH_SECS: u64 = 3;
@@ -1780,7 +1781,8 @@ pub const TelegramChannel = struct {
         defer self.allocator.free(resp);
         if (telegram_api.responseHasTelegramError(resp)) {
             if (telegram_api.responseIsMessageTooLong(resp)) return error.TelegramMessageTooLong;
-            log.warn("telegram sendMessage API error: {s}", .{resp[0..@min(resp.len, 256)]});
+            // NOTE: Log-only preview path; UTF-8 boundary coverage lives in util.previewUtf8 tests.
+            log.warn("telegram sendMessage API error: {s}", .{util.previewUtf8(resp, 256).slice});
             return error.TelegramApiError;
         }
         return telegram_api.parseSentMessageMeta(self.allocator, resp) orelse .{};
@@ -3142,7 +3144,8 @@ pub const TelegramChannel = struct {
                 self.suppressDraftSendsForTarget(chat_id, 24 * 60 * 60);
                 return;
             }
-            log.warn("sendMessageDraft API error: {s}", .{resp[0..@min(resp.len, 256)]});
+            // NOTE: Log-only preview path; UTF-8 boundary coverage lives in util.previewUtf8 tests.
+            log.warn("sendMessageDraft API error: {s}", .{util.previewUtf8(resp, 256).slice});
         }
     }
 

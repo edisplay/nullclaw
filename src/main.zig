@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const yc = @import("nullclaw");
 const control_plane = yc.control_plane;
+const util = yc.util;
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
     _ = error_return_trace;
@@ -1501,15 +1502,14 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         } else {
             std.debug.print("Memory entries: showing {d}/{d}\n", .{ shown, entries.len });
             for (entries[0..shown], 0..) |e, idx| {
-                const preview_len = @min(@as(usize, 120), e.content.len);
-                const preview = e.content[0..preview_len];
+                const preview = util.previewUtf8(e.content, 120);
                 std.debug.print("  {d}. {s} [{s}] {s}\n     {s}{s}\n", .{
                     idx + 1,
                     e.key,
                     e.category.toString(),
                     e.timestamp,
-                    preview,
-                    if (e.content.len > preview_len) "..." else "",
+                    preview.slice,
+                    if (preview.truncated) "..." else "",
                 });
             }
         }
@@ -1586,9 +1586,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             for (results, 0..) |rc, idx| {
                 std.debug.print("  {d}. {s} [{s}]\n", .{ idx + 1, rc.key, rc.category.toString() });
                 printRetrievalScoreLine(rc);
-                const preview_len = @min(@as(usize, 140), rc.snippet.len);
-                const preview = rc.snippet[0..preview_len];
-                std.debug.print("     {s}{s}\n", .{ preview, if (rc.snippet.len > preview_len) "..." else "" });
+                const preview = util.previewUtf8(rc.snippet, 140);
+                std.debug.print("     {s}{s}\n", .{ preview.slice, if (preview.truncated) "..." else "" });
             }
         }
         return;

@@ -8,6 +8,7 @@ const identity_mod = @import("../identity.zig");
 const memory_root = @import("../memory/root.zig");
 const tools_mod = @import("../tools/root.zig");
 const path_prefix = @import("../path_prefix.zig");
+const util = @import("../util.zig");
 const Tool = tools_mod.Tool;
 const skills_mod = @import("../skills.zig");
 const bootstrap_mod = @import("../bootstrap/root.zig");
@@ -21,9 +22,9 @@ const pathStartsWith = path_prefix.pathStartsWith;
 
 /// Maximum characters to include from a single workspace identity file.
 const BOOTSTRAP_MAX_CHARS: usize = 20_000;
-/// Read one extra byte via providers so prompt rendering can distinguish
-/// "exactly at cap" from "truncated beyond cap" without loading full files.
-const BOOTSTRAP_PROVIDER_EXCERPT_BYTES: usize = BOOTSTRAP_MAX_CHARS + 1;
+/// Read up to three extra bytes so callers can keep UTF-8 valid while still
+/// distinguishing "exactly at cap" from "truncated beyond cap".
+const BOOTSTRAP_PROVIDER_EXCERPT_BYTES: usize = BOOTSTRAP_MAX_CHARS + 3;
 /// Maximum total characters from injected bootstrap identity files.
 const BOOTSTRAP_TOTAL_MAX_CHARS: usize = 24_000;
 /// Maximum bytes allowed for guarded workspace bootstrap file reads.
@@ -1073,11 +1074,11 @@ fn appendPromptSectionContent(
     try w.print("### {s}\n\n", .{filename});
 
     const file_limited = if (trimmed.len > BOOTSTRAP_MAX_CHARS)
-        trimmed[0..BOOTSTRAP_MAX_CHARS]
+        util.truncateUtf8(trimmed, BOOTSTRAP_MAX_CHARS)
     else
         trimmed;
-    const total_limited_len = @min(file_limited.len, remaining_bootstrap_chars.*);
-    const total_limited = file_limited[0..total_limited_len];
+    const total_limited = util.truncateUtf8(file_limited, remaining_bootstrap_chars.*);
+    const total_limited_len = total_limited.len;
 
     try w.writeAll(total_limited);
     try w.writeAll("\n\n");
@@ -1645,6 +1646,38 @@ test "appendPromptSectionContent skips section when total budget is exhausted" {
     try std.testing.expect(hit_total_bootstrap_limit);
     buf = buf_writer.toArrayList();
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "appendPromptSectionContent truncates at UTF-8 boundary" {
+    const allocator = std.testing.allocator;
+
+    const prefix = try allocator.alloc(u8, BOOTSTRAP_MAX_CHARS - 1);
+    defer allocator.free(prefix);
+    @memset(prefix, 'a');
+
+    const content = try std.fmt.allocPrint(allocator, "{s}\xf0\x9f\x98\x80tail", .{prefix});
+    defer allocator.free(content);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    var buf_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &buf_writer.writer;
+
+    var remaining_bootstrap_chars: usize = BOOTSTRAP_TOTAL_MAX_CHARS;
+    var hit_total_bootstrap_limit = false;
+    try appendPromptSectionContent(
+        w,
+        "AGENTS.md",
+        content,
+        &remaining_bootstrap_chars,
+        &hit_total_bootstrap_limit,
+    );
+
+    buf = buf_writer.toArrayList();
+    try std.testing.expect(std.unicode.utf8ValidateSlice(buf.items));
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "[... truncated at") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "tail") == null);
+    try std.testing.expect(!hit_total_bootstrap_limit);
 }
 
 test "buildSystemPrompt truncates project context at total bootstrap budget" {

@@ -12,6 +12,7 @@ const version = @import("version.zig");
 const platform = @import("platform.zig");
 const http_util = @import("http_util.zig");
 const sse_client = @import("sse_client.zig");
+const util = @import("util.zig");
 const verbose = @import("verbose.zig");
 const Allocator = std.mem.Allocator;
 
@@ -197,7 +198,8 @@ pub const McpServer = struct {
             defer allocator.free(resp.headers);
             if (resp.status_code < 200 or resp.status_code >= 300) {
                 const max_body: usize = 4096;
-                const body_truncated = if (resp.body.len > max_body) resp.body[0..max_body] else resp.body;
+                // NOTE: Log-only preview path; UTF-8 boundary coverage lives in util.previewUtf8 tests.
+                const body_truncated = util.previewUtf8(resp.body, max_body).slice;
                 if (verbose.isVerbose()) {
                     log.err("MCP server '{s}': HTTP {d}: {s}", .{ self.name, resp.status_code, body_truncated });
                 } else {

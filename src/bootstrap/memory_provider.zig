@@ -10,6 +10,7 @@ const provider = @import("provider.zig");
 const BootstrapProvider = provider.BootstrapProvider;
 const isBootstrapFilename = provider.isBootstrapFilename;
 const memory_root = @import("../memory/root.zig");
+const util = @import("../util.zig");
 const Memory = memory_root.Memory;
 
 pub const Error = error{NotBootstrapFile};
@@ -113,7 +114,7 @@ pub const MemoryBootstrapProvider = struct {
             }
 
             defer allocator.free(entry.content);
-            return try allocator.dupe(u8, entry.content[0..max_bytes]);
+            return try allocator.dupe(u8, util.truncateUtf8(entry.content, max_bytes));
         }
 
         if (self.workspace_dir) |dir| {
@@ -252,12 +253,13 @@ fn diskFallbackExcerpt(workspace_dir: []const u8, allocator: std.mem.Allocator, 
     const file = std_compat.fs.openFileAbsolute(path, .{}) catch return null;
     defer file.close();
 
-    const buf = allocator.alloc(u8, max_bytes) catch return null;
+    const buf = allocator.alloc(u8, max_bytes + 1) catch return null;
     const read_len = file.readAll(buf) catch {
         allocator.free(buf);
         return null;
     };
-    return shrink_alloc(allocator, buf, read_len) catch {
+    const safe_len = util.truncateUtf8(buf[0..read_len], max_bytes).len;
+    return shrink_alloc(allocator, buf, safe_len) catch {
         allocator.free(buf);
         return null;
     };
@@ -327,6 +329,21 @@ test "load_excerpt returns prefix for stored memory bootstrap" {
     try testing.expectEqualStrings("abcd", excerpt.?);
 }
 
+test "load_excerpt keeps UTF-8 intact for stored memory bootstrap" {
+    var lru = InMemoryLruMemory.init(testing.allocator, 100);
+    defer lru.deinit();
+
+    var ctx = initTestProvider(&lru, null);
+    var bp = ctx.provider.provider();
+
+    try bp.store("AGENTS.md", "aaa\xd0\x99tail");
+    const excerpt = try bp.load_excerpt(testing.allocator, "AGENTS.md", 4);
+    defer if (excerpt) |c| testing.allocator.free(c);
+
+    try testing.expectEqualStrings("aaa", excerpt.?);
+    try testing.expect(std.unicode.utf8ValidateSlice(excerpt.?));
+}
+
 test "fallback reads from workspace dir when not in DB" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -368,6 +385,28 @@ test "load_excerpt uses disk fallback prefix when not in DB" {
     defer if (excerpt) |c| testing.allocator.free(c);
 
     try testing.expectEqualStrings("disk", excerpt.?);
+}
+
+test "load_excerpt keeps UTF-8 intact for disk fallback" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    @import("compat").fs.Dir.wrap(tmp.dir).writeFile(.{ .sub_path = "IDENTITY.md", .data = "aaa\xd0\x99tail" }) catch unreachable;
+
+    const workspace = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(workspace);
+
+    var lru = InMemoryLruMemory.init(testing.allocator, 100);
+    defer lru.deinit();
+
+    var ctx = initTestProvider(&lru, workspace);
+    var bp = ctx.provider.provider();
+
+    const excerpt = try bp.load_excerpt(testing.allocator, "IDENTITY.md", 4);
+    defer if (excerpt) |c| testing.allocator.free(c);
+
+    try testing.expectEqualStrings("aaa", excerpt.?);
+    try testing.expect(std.unicode.utf8ValidateSlice(excerpt.?));
 }
 
 test "DB takes priority over disk fallback" {

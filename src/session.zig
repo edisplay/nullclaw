@@ -24,6 +24,7 @@ const providers = @import("providers/root.zig");
 const Provider = providers.Provider;
 const memory_mod = @import("memory/root.zig");
 const Memory = memory_mod.Memory;
+const util = @import("util.zig");
 const onboard = @import("onboard.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const observability = @import("observability.zig");
@@ -72,10 +73,16 @@ const ClaimStateSnapshot = struct {
 };
 
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
-    if (text.len <= MESSAGE_LOG_MAX_BYTES) {
-        return .{ .slice = text, .truncated = false };
-    }
-    return .{ .slice = text[0..MESSAGE_LOG_MAX_BYTES], .truncated = true };
+    const preview = util.previewUtf8(text, MESSAGE_LOG_MAX_BYTES);
+    return .{ .slice = preview.slice, .truncated = preview.truncated };
+}
+
+test "messageLogPreview keeps UTF-8 intact when truncating" {
+    const prefix = "a" ** (MESSAGE_LOG_MAX_BYTES - 1);
+    const preview = messageLogPreview(prefix ++ "\xd0\x99tail");
+    try std.testing.expectEqualStrings(prefix, preview.slice);
+    try std.testing.expect(preview.truncated);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.slice));
 }
 
 fn estimateRestoredSessionTokens(entries: []const memory_mod.MessageEntry) u64 {
