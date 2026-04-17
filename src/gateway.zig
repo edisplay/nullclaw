@@ -6,7 +6,7 @@
 //!   - Body size limits (configurable, default 64KB)
 //!   - Request timeouts (configurable, default 30s)
 //!   - Bearer token authentication (PairingGuard)
-//!   - Endpoints: /health, /ready, /pair, /logout, /webhook, /a2a, /.well-known/agent-card.json, /whatsapp, /telegram, /line, /lark, /wechat, /wecom, /qq, /max, /slack/events, /api/messages (Teams)
+//!   - Endpoints: /health, /ready, /status, /pair, /logout, /webhook, /a2a, /.well-known/agent-card.json, /whatsapp, /telegram, /line, /lark, /wechat, /wecom, /qq, /max, /slack/events, /api/messages (Teams)
 //!
 //! Uses std.http.Server (built-in, no external deps).
 
@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const daemon = @import("daemon.zig");
 const health = @import("health.zig");
+const status_mod = @import("status.zig");
 const Config = @import("config.zig").Config;
 const config_types = @import("config_types.zig");
 const fs_compat = @import("fs_compat.zig");
@@ -4960,7 +4961,7 @@ pub fn clearSharedScheduler() void {
 }
 
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
-/// Endpoints: GET /health, GET /ready, POST /pair, POST /logout, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
+/// Endpoints: GET /health, GET /ready, GET /status, POST /pair, POST /logout, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
 /// If config_ptr is null, loads config internally (for backward compatibility).
 pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr: ?*const Config, event_bus: ?*bus_mod.Bus) !void {
     health.markComponentOk("gateway");
@@ -5252,10 +5253,11 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
         const target = parts.next() orelse continue;
 
         // Simple routing — control endpoints + descriptor-driven channel webhooks.
-        const ControlRoute = enum { health, ready, webhook, pair, logout };
+        const ControlRoute = enum { health, ready, status, webhook, pair, logout };
         const control_route_map = std.StaticStringMap(ControlRoute).initComptime(.{
             .{ "/health", .health },
             .{ "/ready", .ready },
+            .{ "/status", .status },
             .{ "/webhook", .webhook },
             .{ "/pair", .pair },
             .{ "/logout", .logout },
@@ -5420,6 +5422,13 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 if (readiness.status != .ready) {
                     response_status = "503 Service Unavailable";
                 }
+            },
+            .status => {
+                response_body = status_mod.buildRuntimeStatusJson(req_allocator) catch {
+                    response_status = "500 Internal Server Error";
+                    response_body = "{\"error\":\"status_unavailable\"}";
+                    continue;
+                };
             },
             .webhook => {
                 if (!is_post) {

@@ -86,6 +86,7 @@ const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
     \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--model MODEL] [--memory MEM]
     \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP]
     \\  gateway [--port PORT] [--host HOST]
+    \\  status [--json]
     \\  version | --version | -V
     \\  service <{s}>
     \\  config <{s}> [ARGS]
@@ -213,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
 
     switch (cmd) {
         .version => printVersion(),
-        .status => try yc.status.run(allocator),
+        .status => try yc.status.run(allocator, args[2..]),
         .agent => if (agentHelpRequested(sub_args)) {
             printAgentUsage();
         } else {
@@ -516,8 +517,8 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             \\Usage: nullclaw cron <{s}> [args]
             \\
             \\Commands:
-            \\  list                          List all scheduled tasks
-            \\  status                        Show scheduler daemon status
+            \\  list [--json]                 List all scheduled tasks
+            \\  status [--json]               Show scheduler daemon status
             \\  add <expression> <command>    Add a recurring cron job
             \\  add-agent <expression> <prompt> [--model <model>] [--announce] [--channel <name>] [--account <id>] [--to <id>]
             \\                                Add a recurring agent cron job
@@ -538,9 +539,17 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     const subcmd = sub_args[0];
 
     if (std.mem.eql(u8, subcmd, "list")) {
-        try yc.cron.cliListJobs(allocator);
+        if (sub_args.len > 2 or (sub_args.len == 2 and !std.mem.eql(u8, sub_args[1], "--json"))) {
+            std.debug.print("Usage: nullclaw cron list [--json]\n", .{});
+            std_compat.process.exit(1);
+        }
+        try yc.cron.cliListJobs(allocator, hasJsonFlag(sub_args[1..]));
     } else if (std.mem.eql(u8, subcmd, "status")) {
-        try yc.cron.cliStatus(allocator);
+        if (sub_args.len > 2 or (sub_args.len == 2 and !std.mem.eql(u8, sub_args[1], "--json"))) {
+            std.debug.print("Usage: nullclaw cron status [--json]\n", .{});
+            std_compat.process.exit(1);
+        }
+        try yc.cron.cliStatus(allocator, hasJsonFlag(sub_args[1..]));
     } else if (std.mem.eql(u8, subcmd, "add")) {
         if (sub_args.len < 3) {
             std.debug.print("Usage: nullclaw cron add <expression> <command>\n", .{});
