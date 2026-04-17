@@ -36,21 +36,23 @@ const Command = enum {
     workspace,
     capabilities,
     models,
+    mcp,
     auth,
     update,
     help,
 };
 
 const SERVICE_SUBCOMMANDS = "install|start|stop|restart|status|uninstall";
-const CONFIG_SUBCOMMANDS = "show|get";
-const CRON_SUBCOMMANDS = "list|status|add|add-agent|once|once-agent|remove|pause|resume|run|update|runs";
+const CONFIG_SUBCOMMANDS = "show|get|set|unset|reload|validate";
+const CRON_SUBCOMMANDS = "list|get|status|add|add-agent|once|once-agent|remove|pause|resume|run|update|runs";
 const CHANNEL_SUBCOMMANDS = "list|info|start|status|add|remove";
 const SKILLS_SUBCOMMANDS = "list|install|remove|info";
 const HARDWARE_SUBCOMMANDS = "scan|flash|monitor";
-const MEMORY_SUBCOMMANDS = "stats|count|reindex|search|get|list|drain-outbox|forget";
+const MEMORY_SUBCOMMANDS = "stats|count|reindex|search|get|list|store|update|delete|drain-outbox|forget";
 const HISTORY_SUBCOMMANDS = "list|show";
 const WORKSPACE_SUBCOMMANDS = "edit|reset-md";
 const MODELS_SUBCOMMANDS = "list|summary|info|benchmark|refresh";
+const MCP_SUBCOMMANDS = "list|info";
 const AUTH_SUBCOMMANDS = "login|status|logout";
 
 const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
@@ -78,6 +80,7 @@ const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
     \\  workspace    Maintain workspace markdown/bootstrap files
     \\  capabilities Show runtime capabilities manifest
     \\  models       Manage provider model catalogs
+    \\  mcp          Inspect configured MCP servers
     \\  auth         Manage OAuth authentication (OpenAI Codex)
     \\  update       Check for and install updates
     \\  help         Show this help
@@ -100,6 +103,7 @@ const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
     \\  workspace <{s}> [ARGS]
     \\  capabilities [--json]
     \\  models <{s}> [ARGS]
+    \\  mcp <{s}> [ARGS]
     \\  auth <{s}> <provider> [--import-codex]
     \\  update [--check] [--yes]
     \\
@@ -115,6 +119,7 @@ const TOP_LEVEL_USAGE = std.fmt.comptimePrint(
         HISTORY_SUBCOMMANDS,
         WORKSPACE_SUBCOMMANDS,
         MODELS_SUBCOMMANDS,
+        MCP_SUBCOMMANDS,
         AUTH_SUBCOMMANDS,
     },
 );
@@ -141,6 +146,7 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "workspace", .workspace },
         .{ "capabilities", .capabilities },
         .{ "models", .models },
+        .{ "mcp", .mcp },
         .{ "auth", .auth },
         .{ "update", .update },
         .{ "help", .help },
@@ -215,13 +221,15 @@ pub fn main(init: std.process.Init) !void {
     switch (cmd) {
         .version => printVersion(),
         .status => try yc.status.run(allocator, args[2..]),
-        .agent => if (agentHelpRequested(sub_args)) {
+        .agent => if (agentAdminRequested(sub_args)) {
+            try runAgentAdmin(allocator, sub_args);
+        } else if (agentHelpRequested(sub_args)) {
             printAgentUsage();
         } else {
             try yc.agent.run(allocator, sub_args);
         },
         .onboard => try runOnboard(allocator, sub_args),
-        .doctor => try yc.doctor.run(allocator),
+        .doctor => try runDoctorCommand(allocator, sub_args),
         .help => printUsage(),
         .gateway => try runGateway(allocator, sub_args),
         .service => try runService(allocator, sub_args),
@@ -236,6 +244,7 @@ pub fn main(init: std.process.Init) !void {
         .workspace => try runWorkspace(allocator, sub_args),
         .capabilities => try runCapabilities(allocator, sub_args),
         .models => try runModels(allocator, sub_args),
+        .mcp => try runMcp(allocator, sub_args),
         .auth => try runAuth(allocator, sub_args),
         .update => try runUpdate(allocator, sub_args),
     }
@@ -289,6 +298,11 @@ fn agentHelpRequested(args: []const []const u8) bool {
         }
     }
     return false;
+}
+
+fn agentAdminRequested(args: []const []const u8) bool {
+    if (args.len == 0) return false;
+    return std.mem.eql(u8, args[0], "invoke") or std.mem.eql(u8, args[0], "sessions");
 }
 
 fn gatewayHelpRequested(args: []const []const u8) bool {
@@ -351,6 +365,15 @@ fn printAgentUsage() void {
         \\Start the AI agent loop.
         \\
         \\OPTIONS:
+        \\  invoke --message MESSAGE [--session SESSION] [--json]
+        \\                               Run one machine-readable agent turn
+        \\  sessions list [--json]       List persisted agent sessions
+        \\  sessions get <session> [--json]
+        \\                               Show persisted session metadata
+        \\  sessions terminate <session> [--json]
+        \\                               Clear persisted session state
+        \\
+        \\INTERACTIVE / SINGLE-TURN MODE:
         \\  -m, --message MESSAGE        Run a single message (non-interactive)
         \\  -s, --session SESSION         Resume a specific session
         \\  --provider PROVIDER           Override default provider
@@ -360,6 +383,389 @@ fn printAgentUsage() void {
         \\  --help, -h                    Show this help
         \\
     , .{});
+}
+
+const HistoryStoreContext = struct {
+    cfg: yc.config.Config,
+    mem_rt: yc.memory.MemoryRuntime,
+    session_store: yc.memory.SessionStore,
+
+    fn init(allocator: std.mem.Allocator) !HistoryStoreContext {
+        var cfg = yc.config.Config.load(allocator) catch return error.ConfigNotFound;
+        errdefer cfg.deinit();
+
+        var history_memory_cfg = buildHistoryMemoryConfig(cfg.memory);
+        var mem_rt = yc.memory.initRuntime(allocator, &history_memory_cfg, cfg.workspace_dir) orelse return error.MemoryRuntimeUnavailable;
+        errdefer mem_rt.deinit();
+
+        const session_store = mem_rt.session_store orelse return error.SessionStoreUnavailable;
+        return .{
+            .cfg = cfg,
+            .mem_rt = mem_rt,
+            .session_store = session_store,
+        };
+    }
+
+    fn deinit(self: *HistoryStoreContext) void {
+        self.mem_rt.deinit();
+        self.cfg.deinit();
+        self.* = undefined;
+    }
+};
+
+fn runDoctorCommand(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    if (sub_args.len == 0) {
+        try yc.doctor.run(allocator);
+        return;
+    }
+    if (sub_args.len == 1 and std.mem.eql(u8, sub_args[0], "--json")) {
+        const json = yc.status.buildRuntimeStatusJson(allocator) catch |err| {
+            writeJsonError("doctor_failed", @errorName(err), null);
+            std_compat.process.exit(1);
+        };
+        defer allocator.free(json);
+        printStdoutBytes(json);
+        printStdoutBytes("\n");
+        return;
+    }
+
+    std.debug.print("Usage: nullclaw doctor [--json]\n", .{});
+    std_compat.process.exit(1);
+}
+
+fn selfCommandResult(allocator: std.mem.Allocator, args: []const []const u8) !std_compat.process.Child.RunResult {
+    const exe_path = try std_compat.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, exe_path);
+    for (args) |arg| try argv.append(allocator, arg);
+
+    return std_compat.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+    });
+}
+
+fn trimTrailingNewline(text: []const u8) []const u8 {
+    var trimmed = text;
+    while (trimmed.len > 0 and (trimmed[trimmed.len - 1] == '\n' or trimmed[trimmed.len - 1] == '\r')) {
+        trimmed = trimmed[0 .. trimmed.len - 1];
+    }
+    return trimmed;
+}
+
+fn writeAgentSessionListJson(sessions: []const yc.memory.SessionInfo, total: u64) !void {
+    var buf: [65536]u8 = undefined;
+    var bw = std_compat.fs.File.stdout().writer(&buf);
+    const out = &bw.interface;
+
+    out.print("{{\"sessions\":[", .{}) catch return;
+    for (sessions, 0..) |session, idx| {
+        if (idx > 0) out.writeAll(",") catch return;
+        out.writeAll("{\"session_key\":") catch return;
+        writeJsonString(out, session.session_id) catch return;
+        out.writeAll(",\"created_at\":") catch return;
+        writeJsonString(out, session.first_message_at) catch return;
+        out.writeAll(",\"last_active\":") catch return;
+        writeJsonString(out, session.last_message_at) catch return;
+        out.print(",\"turn_count\":{d},\"turn_running\":false}}", .{session.message_count / 2}) catch return;
+    }
+    out.print("],\"total\":{d}}}\n", .{total}) catch return;
+    out.flush() catch return;
+}
+
+fn writeAgentSessionDetailJson(session: yc.memory.SessionInfo) void {
+    var buf: [4096]u8 = undefined;
+    var bw = std_compat.fs.File.stdout().writer(&buf);
+    const out = &bw.interface;
+
+    out.writeAll("{\"session_key\":") catch return;
+    writeJsonString(out, session.session_id) catch return;
+    out.writeAll(",\"created_at\":") catch return;
+    writeJsonString(out, session.first_message_at) catch return;
+    out.writeAll(",\"last_active\":") catch return;
+    writeJsonString(out, session.last_message_at) catch return;
+    out.print(",\"turn_count\":{d},\"turn_running\":false}}\n", .{session.message_count / 2}) catch return;
+    out.flush() catch return;
+}
+
+fn runAgentAdmin(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    if (sub_args.len == 0) {
+        printAgentUsage();
+        std_compat.process.exit(1);
+    }
+
+    const subcmd = sub_args[0];
+    if (std.mem.eql(u8, subcmd, "invoke")) {
+        try runAgentInvokeJson(allocator, sub_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, subcmd, "sessions")) {
+        try runAgentSessionsAdmin(allocator, sub_args[1..]);
+        return;
+    }
+
+    printAgentUsage();
+    std_compat.process.exit(1);
+}
+
+fn runAgentInvokeJson(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    var message: ?[]const u8 = null;
+    var session: ?[]const u8 = null;
+    var provider: ?[]const u8 = null;
+    var model: ?[]const u8 = null;
+    var temperature: ?[]const u8 = null;
+    var agent_name: ?[]const u8 = null;
+    var json_mode = false;
+
+    var i: usize = 0;
+    while (i < sub_args.len) : (i += 1) {
+        const arg = sub_args[i];
+        if (std.mem.eql(u8, arg, "--message") or std.mem.eql(u8, arg, "-m")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --message", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            message = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "-s")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --session", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            session = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--provider")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --provider", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            provider = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--model")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --model", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            model = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--temperature")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --temperature", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            temperature = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--agent")) {
+            if (i + 1 >= sub_args.len) {
+                writeJsonError("bad_request", "Missing value for --agent", null);
+                std_compat.process.exit(1);
+            }
+            i += 1;
+            agent_name = sub_args[i];
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
+        } else {
+            writeJsonError("bad_request", "Unknown option for agent invoke", null);
+            std_compat.process.exit(1);
+        }
+    }
+
+    if (!json_mode) {
+        writeJsonError("bad_request", "agent invoke requires --json", null);
+        std_compat.process.exit(1);
+    }
+    const message_text = message orelse {
+        writeJsonError("bad_request", "agent invoke requires --message", null);
+        std_compat.process.exit(1);
+    };
+    if (std.mem.trim(u8, message_text, " \t\r\n").len == 0) {
+        writeJsonError("bad_request", "agent invoke message must not be empty", null);
+        std_compat.process.exit(1);
+    }
+
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "agent");
+    try argv.append(allocator, "-m");
+    try argv.append(allocator, message_text);
+
+    const effective_session = session orelse "api:default";
+    try argv.append(allocator, "-s");
+    try argv.append(allocator, effective_session);
+    if (provider) |value| {
+        try argv.append(allocator, "--provider");
+        try argv.append(allocator, value);
+    }
+    if (model) |value| {
+        try argv.append(allocator, "--model");
+        try argv.append(allocator, value);
+    }
+    if (temperature) |value| {
+        try argv.append(allocator, "--temperature");
+        try argv.append(allocator, value);
+    }
+    if (agent_name) |value| {
+        try argv.append(allocator, "--agent");
+        try argv.append(allocator, value);
+    }
+
+    const result = selfCommandResult(allocator, argv.items) catch |err| {
+        writeJsonError("agent_invoke_failed", @errorName(err), null);
+        std_compat.process.exit(1);
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    if (switch (result.term) { .exited => |code| code == 0, else => false }) {
+        var ctx = HistoryStoreContext.init(allocator) catch |err| switch (err) {
+            error.ConfigNotFound => {
+                writeJsonError("config_not_found", "No config found -- run `nullclaw onboard` first", null);
+                std_compat.process.exit(1);
+            },
+            error.MemoryRuntimeUnavailable => {
+                writeJsonError("session_store_unavailable", "Failed to initialize session store", null);
+                std_compat.process.exit(1);
+            },
+            error.SessionStoreUnavailable => {
+                writeJsonError("session_store_unavailable", "Session store not available for configured backend", null);
+                std_compat.process.exit(1);
+            },
+        };
+        defer ctx.deinit();
+
+        const total = ctx.session_store.countDetailedMessages(effective_session) catch 0;
+        const turn_count: u64 = total / 2;
+        const response_text = trimTrailingNewline(result.stdout);
+
+        var buf: [65536]u8 = undefined;
+        var bw = std_compat.fs.File.stdout().writer(&buf);
+        const out = &bw.interface;
+        out.writeAll("{\"session\":") catch return;
+        writeJsonString(out, effective_session) catch return;
+        out.writeAll(",\"response\":") catch return;
+        writeJsonString(out, response_text) catch return;
+        out.print(",\"turn_count\":{d}}}\n", .{turn_count}) catch return;
+        out.flush() catch return;
+        return;
+    }
+
+    const stderr_line = trimTrailingNewline(result.stderr);
+    if (stderr_line.len > 0) {
+        writeJsonError("agent_invoke_failed", stderr_line, null);
+    } else {
+        writeJsonError("agent_invoke_failed", "Agent invocation failed", null);
+    }
+    std_compat.process.exit(1);
+}
+
+fn runAgentSessionsAdmin(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    if (sub_args.len == 0) {
+        writeJsonError("bad_request", "Usage: nullclaw agent sessions <list|get|terminate> ...", null);
+        std_compat.process.exit(1);
+    }
+
+    const subcmd = sub_args[0];
+    const json_mode = hasJsonFlag(sub_args[1..]);
+
+    var ctx = HistoryStoreContext.init(allocator) catch |err| switch (err) {
+        error.ConfigNotFound => {
+            if (json_mode) writeJsonError("config_not_found", "No config found -- run `nullclaw onboard` first", null);
+            std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
+            std_compat.process.exit(1);
+        },
+        error.MemoryRuntimeUnavailable, error.SessionStoreUnavailable => {
+            if (json_mode) writeJsonError("session_store_unavailable", "Session store is not available for configured backend", null);
+            std.debug.print("Session store is not available for configured backend\n", .{});
+            std_compat.process.exit(1);
+        },
+    };
+    defer ctx.deinit();
+
+    if (std.mem.eql(u8, subcmd, "list")) {
+        if (sub_args.len > 2 or !json_mode) {
+            writeJsonError("bad_request", "Usage: nullclaw agent sessions list --json", null);
+            std_compat.process.exit(1);
+        }
+        const total = ctx.session_store.countSessions() catch |err| {
+            writeJsonError("session_list_failed", @errorName(err), ctx.cfg.memory.backend);
+            std_compat.process.exit(1);
+        };
+        const sessions = ctx.session_store.listSessions(allocator, @intCast(@max(total, 1)), 0) catch |err| {
+            writeJsonError("session_list_failed", @errorName(err), ctx.cfg.memory.backend);
+            std_compat.process.exit(1);
+        };
+        defer yc.memory.freeSessionInfos(allocator, sessions);
+        try writeAgentSessionListJson(sessions, total);
+        return;
+    }
+
+    if (sub_args.len < 2 or !json_mode) {
+        writeJsonError("bad_request", "Usage: nullclaw agent sessions <get|terminate> <session> --json", null);
+        std_compat.process.exit(1);
+    }
+    const session_key = sub_args[1];
+
+    const total = ctx.session_store.countSessions() catch |err| {
+        writeJsonError("session_list_failed", @errorName(err), ctx.cfg.memory.backend);
+        std_compat.process.exit(1);
+    };
+    const sessions = ctx.session_store.listSessions(allocator, @intCast(@max(total, 1)), 0) catch |err| {
+        writeJsonError("session_list_failed", @errorName(err), ctx.cfg.memory.backend);
+        std_compat.process.exit(1);
+    };
+    defer yc.memory.freeSessionInfos(allocator, sessions);
+
+    const session = blk: {
+        for (sessions) |item| {
+            if (std.mem.eql(u8, item.session_id, session_key)) break :blk item;
+        }
+        break :blk null;
+    };
+
+    if (std.mem.eql(u8, subcmd, "get")) {
+        if (session) |value| {
+            writeAgentSessionDetailJson(value);
+            return;
+        }
+        writeJsonError("session_not_found", "No session with that key", ctx.cfg.memory.backend);
+        std_compat.process.exit(1);
+    }
+
+    if (std.mem.eql(u8, subcmd, "terminate")) {
+        if (session == null) {
+            writeJsonError("session_not_found", "No session with that key", ctx.cfg.memory.backend);
+            std_compat.process.exit(1);
+        }
+
+        ctx.session_store.clearMessages(session_key) catch |err| {
+            writeJsonError("session_terminate_failed", @errorName(err), ctx.cfg.memory.backend);
+            std_compat.process.exit(1);
+        };
+        ctx.session_store.clearAutoSaved(session_key) catch {};
+
+        const entries_opt = ctx.mem_rt.memory.list(allocator, null, session_key) catch null;
+        if (entries_opt) |entries| {
+            defer yc.memory.freeEntries(allocator, entries);
+            for (entries) |entry| {
+                _ = ctx.mem_rt.memory.forgetScoped(allocator, entry.key, session_key) catch {};
+            }
+        }
+
+        var buf: [4096]u8 = undefined;
+        var bw = std_compat.fs.File.stdout().writer(&buf);
+        const out = &bw.interface;
+        out.writeAll("{\"session_key\":") catch return;
+        writeJsonString(out, session_key) catch return;
+        out.writeAll(",\"terminated\":true}\n") catch return;
+        out.flush() catch return;
+        return;
+    }
+
+    writeJsonError("bad_request", "Unknown agent sessions command", null);
+    std_compat.process.exit(1);
 }
 
 fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
@@ -518,6 +924,7 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             \\
             \\Commands:
             \\  list [--json]                 List all scheduled tasks
+            \\  get <id> [--json]             Show one scheduled task
             \\  status [--json]               Show scheduler daemon status
             \\  add <expression> <command>    Add a recurring cron job
             \\  add-agent <expression> <prompt> [--model <model>] [--announce] [--channel <name>] [--account <id>] [--to <id>]
@@ -530,7 +937,8 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             \\  resume <id>                   Resume a paused task
             \\  run <id>                      Run a scheduled task immediately
             \\  update <id> [options]         Update a cron job
-            \\  runs <id>                     List recent run history for a job
+            \\  runs <id> [--limit N] [--json]
+            \\                                List recent run history for a job
             \\
         , .{CRON_SUBCOMMANDS}), .{});
         std_compat.process.exit(1);
@@ -544,6 +952,35 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             std_compat.process.exit(1);
         }
         try yc.cron.cliListJobs(allocator, hasJsonFlag(sub_args[1..]));
+    } else if (std.mem.eql(u8, subcmd, "get")) {
+        if (sub_args.len < 2 or sub_args.len > 3 or (sub_args.len == 3 and !std.mem.eql(u8, sub_args[2], "--json"))) {
+            std.debug.print("Usage: nullclaw cron get <id> [--json]\n", .{});
+            std_compat.process.exit(1);
+        }
+
+        var scheduler = yc.cron.CronScheduler.init(allocator, 1024, true);
+        defer scheduler.deinit();
+        try yc.cron.loadJobs(&scheduler);
+
+        const job = scheduler.getJob(sub_args[1]) orelse {
+            if (hasJsonFlag(sub_args[2..])) {
+                printStdoutBytes("null\n");
+            } else {
+                std.debug.print("Cron job '{s}' not found\n", .{sub_args[1]});
+                std_compat.process.exit(1);
+            }
+            return;
+        };
+
+        if (hasJsonFlag(sub_args[2..])) {
+            writeCronJobJson(job);
+        } else {
+            std.debug.print("Cron job: {s}\n", .{job.id});
+            std.debug.print("  Expression:  {s}\n", .{job.expression});
+            std.debug.print("  Command:     {s}\n", .{job.command});
+            std.debug.print("  Type:        {s}\n", .{job.job_type.asStr()});
+            std.debug.print("  Next run:    {d}\n", .{job.next_run_secs});
+        }
     } else if (std.mem.eql(u8, subcmd, "status")) {
         if (sub_args.len > 2 or (sub_args.len == 2 and !std.mem.eql(u8, sub_args[1], "--json"))) {
             std.debug.print("Usage: nullclaw cron status [--json]\n", .{});
@@ -659,10 +1096,54 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         };
     } else if (std.mem.eql(u8, subcmd, "runs")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron runs <id>\n", .{});
+            std.debug.print("Usage: nullclaw cron runs <id> [--limit N] [--json]\n", .{});
             std_compat.process.exit(1);
         }
-        try yc.cron.cliListRuns(allocator, sub_args[1]);
+        var limit: usize = 10;
+        var json_mode = false;
+        var i: usize = 2;
+        while (i < sub_args.len) : (i += 1) {
+            if (std.mem.eql(u8, sub_args[i], "--limit")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw cron runs <id> [--limit N] [--json]\n", .{});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                limit = parsePositiveUsize(sub_args[i]) orelse {
+                    std.debug.print("Invalid --limit value: {s}\n", .{sub_args[i]});
+                    std_compat.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, sub_args[i], "--json")) {
+                json_mode = true;
+            } else {
+                std.debug.print("Unknown option for cron runs: {s}\n", .{sub_args[i]});
+                std_compat.process.exit(1);
+            }
+        }
+
+        if (!json_mode and limit == 10 and sub_args.len == 2) {
+            try yc.cron.cliListRuns(allocator, sub_args[1]);
+            return;
+        }
+
+        var scheduler = yc.cron.CronScheduler.init(allocator, 1024, true);
+        defer scheduler.deinit();
+        try yc.cron.loadJobs(&scheduler);
+        const runs = try scheduler.listRuns(allocator, sub_args[1], limit);
+        defer allocator.free(runs);
+
+        if (json_mode) {
+            writeCronRunsJson(runs);
+        } else {
+            if (runs.len == 0) {
+                std.debug.print("No recorded runs for job '{s}'\n", .{sub_args[1]});
+                return;
+            }
+            std.debug.print("Run history for job {s}:\n", .{sub_args[1]});
+            for (runs) |run| {
+                std.debug.print("  #{d} {s} {d}->{d}\n", .{ run.id, run.status, run.started_at_s, run.finished_at_s });
+            }
+        }
     } else {
         std.debug.print("Unknown cron command: {s}\n", .{subcmd});
         std_compat.process.exit(1);
@@ -1168,13 +1649,20 @@ fn printMemoryUsage() void {
         \\  stats [--json]                Show resolved memory config and key counters
         \\  count                         Show total number of memory entries
         \\  reindex                       Rebuild vector index from primary memory
-        \\  search <query> [--limit N] [--json]
+        \\  search <query> [--limit N] [--session ID] [--json]
         \\                                Run runtime retrieval (keyword/hybrid)
-        \\  get <key> [--json]            Show a single memory entry by key
-        \\  list [--category C] [--limit N] [--json]
+        \\  get <key> [--session ID] [--json]
+        \\                                Show a single memory entry by key
+        \\  list [--category C] [--limit N] [--session ID] [--include-internal] [--json]
         \\                                List memory entries (default limit: 20)
-        \\  drain-outbox                  Drain durable vector outbox queue
-        \\  forget <key>                  Delete entry from primary memory (if backend supports)
+        \\  store <key> <content> [--category C] [--session ID] [--json]
+        \\                                Create or overwrite a memory entry
+        \\  update <key> <content> [--category C] [--session ID] [--json]
+        \\                                Update an existing memory entry
+        \\  delete <key> [--session ID] [--json]
+        \\                                Delete an entry from primary memory
+        \\  drain-outbox [--json]         Drain durable vector outbox queue
+        \\  forget <key>                  Legacy alias for delete
         \\
     , .{MEMORY_SUBCOMMANDS}), .{});
 }
@@ -1298,6 +1786,18 @@ fn writeJsonNullableF32(out: anytype, value: ?f32) !void {
     }
 }
 
+fn writeJsonNullableI64(out: anytype, value: ?i64) !void {
+    if (value) |n| {
+        try out.print("{d}", .{n});
+    } else {
+        try out.writeAll("null");
+    }
+}
+
+fn writeJsonBool(out: anytype, value: bool) !void {
+    try out.writeAll(if (value) "true" else "false");
+}
+
 fn writeJsonError(code: []const u8, message: []const u8, backend: ?[]const u8) void {
     var buf: [4096]u8 = undefined;
     var bw = std_compat.fs.File.stdout().writer(&buf);
@@ -1312,6 +1812,133 @@ fn writeJsonError(code: []const u8, message: []const u8, backend: ?[]const u8) v
         writeJsonString(out, value) catch return;
     }
     out.writeAll("}\n") catch return;
+    out.flush() catch return;
+}
+
+fn writeConfigMutationJson(
+    action: yc.config_mutator.MutationAction,
+    result: *const yc.config_mutator.MutationResult,
+) void {
+    var buf: [8192]u8 = undefined;
+    var bw = std_compat.fs.File.stdout().writer(&buf);
+    const out = &bw.interface;
+
+    out.writeAll("{\"action\":") catch return;
+    writeJsonString(out, @tagName(action)) catch return;
+    out.writeAll(",\"path\":") catch return;
+    writeJsonString(out, result.path) catch return;
+    out.writeAll(",\"changed\":") catch return;
+    writeJsonBool(out, result.changed) catch return;
+    out.writeAll(",\"applied\":") catch return;
+    writeJsonBool(out, result.applied) catch return;
+    out.writeAll(",\"requires_restart\":") catch return;
+    writeJsonBool(out, result.requires_restart) catch return;
+    out.writeAll(",\"old_value\":") catch return;
+    out.writeAll(result.old_value_json) catch return;
+    out.writeAll(",\"new_value\":") catch return;
+    out.writeAll(result.new_value_json) catch return;
+    out.writeAll(",\"backup_path\":") catch return;
+    writeJsonNullableString(out, result.backup_path) catch return;
+    out.writeAll("}\n") catch return;
+    out.flush() catch return;
+}
+
+fn modelCanonicalProvider(raw_model: []const u8) ?[]const u8 {
+    const slash = std.mem.indexOfScalar(u8, raw_model, '/') orelse return null;
+    if (slash == 0) return null;
+    return yc.onboard.canonicalProviderName(raw_model[0..slash]);
+}
+
+fn writeModelInfoJson(model_name: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    var bw = std_compat.fs.File.stdout().writer(&buf);
+    const out = &bw.interface;
+
+    const provider = modelCanonicalProvider(model_name);
+
+    out.writeAll("{\"name\":") catch return;
+    writeJsonString(out, model_name) catch return;
+    out.writeAll(",\"provider\":") catch return;
+    writeJsonNullableString(out, provider) catch return;
+    out.writeAll(",\"canonical_name\":") catch return;
+    if (provider) |canonical_provider| {
+        const slash = std.mem.indexOfScalar(u8, model_name, '/').?;
+        if (slash + 1 < model_name.len) {
+            out.writeByte('"') catch return;
+            writeJsonEscaped(out, canonical_provider);
+            out.writeByte('/') catch return;
+            writeJsonEscaped(out, model_name[slash + 1 ..]);
+            out.writeByte('"') catch return;
+        } else {
+            writeJsonString(out, canonical_provider) catch return;
+        }
+    } else {
+        writeJsonString(out, model_name) catch return;
+    }
+    out.writeAll(",\"context_window\":null}\n") catch return;
+    out.flush() catch return;
+}
+
+fn writeCronJobJson(job: *const yc.cron.CronJob) void {
+    var buf: [16384]u8 = undefined;
+    var bw = std_compat.fs.File.stdout().writer(&buf);
+    const out = &bw.interface;
+
+    out.writeAll("{\"id\":") catch return;
+    writeJsonString(out, job.id) catch return;
+    out.writeAll(",\"expression\":") catch return;
+    writeJsonString(out, job.expression) catch return;
+    out.writeAll(",\"command\":") catch return;
+    writeJsonString(out, job.command) catch return;
+    out.print(",\"next_run_secs\":{d}", .{job.next_run_secs}) catch return;
+    out.writeAll(",\"last_run_secs\":") catch return;
+    writeJsonNullableI64(out, job.last_run_secs) catch return;
+    out.writeAll(",\"last_status\":") catch return;
+    writeJsonNullableString(out, job.last_status) catch return;
+    out.writeAll(",\"paused\":") catch return;
+    writeJsonBool(out, job.paused) catch return;
+    out.writeAll(",\"one_shot\":") catch return;
+    writeJsonBool(out, job.one_shot) catch return;
+    out.writeAll(",\"job_type\":") catch return;
+    writeJsonString(out, job.job_type.asStr()) catch return;
+    out.writeAll(",\"session_target\":") catch return;
+    writeJsonString(out, job.session_target.asStr()) catch return;
+    out.writeAll(",\"prompt\":") catch return;
+    writeJsonNullableString(out, job.prompt) catch return;
+    out.writeAll(",\"name\":") catch return;
+    writeJsonNullableString(out, job.name) catch return;
+    out.writeAll(",\"model\":") catch return;
+    writeJsonNullableString(out, job.model) catch return;
+    out.writeAll(",\"enabled\":") catch return;
+    writeJsonBool(out, job.enabled) catch return;
+    out.writeAll(",\"delete_after_run\":") catch return;
+    writeJsonBool(out, job.delete_after_run) catch return;
+    out.print(",\"created_at_s\":{d}", .{job.created_at_s}) catch return;
+    out.writeAll(",\"last_output\":") catch return;
+    writeJsonNullableString(out, job.last_output) catch return;
+    out.writeAll("}\n") catch return;
+    out.flush() catch return;
+}
+
+fn writeCronRunsJson(runs: []const yc.cron.CronRun) void {
+    var buf: [65536]u8 = undefined;
+    var bw = std_compat.fs.File.stdout().writer(&buf);
+    const out = &bw.interface;
+
+    out.writeAll("{\"runs\":[") catch return;
+    for (runs, 0..) |run, idx| {
+        if (idx > 0) out.writeAll(",") catch return;
+        out.print("{{\"id\":{d},\"job_id\":", .{run.id}) catch return;
+        writeJsonString(out, run.job_id) catch return;
+        out.print(",\"started_at_s\":{d},\"finished_at_s\":{d},\"status\":", .{ run.started_at_s, run.finished_at_s }) catch return;
+        writeJsonString(out, run.status) catch return;
+        out.writeAll(",\"output\":") catch return;
+        writeJsonNullableString(out, run.output) catch return;
+        out.writeAll(",\"duration_ms\":") catch return;
+        writeJsonNullableI64(out, run.duration_ms) catch return;
+        out.writeAll("}") catch return;
+    }
+    out.print("],\"total\":{d}}}\n", .{runs.len}) catch return;
     out.flush() catch return;
 }
 
@@ -1342,6 +1969,24 @@ fn writeSkillJson(
     try out.writeAll(",\"source\":");
     try writeJsonString(out, skillSource(workspace_dir, community_base, skill));
     try out.print(",\"instructions_bytes\":{d}}}", .{skill.instructions.len});
+}
+
+fn memoryEntryVisible(include_internal: bool, entry: yc.memory.MemoryEntry) bool {
+    return include_internal or !yc.memory.isInternalMemoryEntryKeyOrContent(entry.key, entry.content);
+}
+
+fn writeMemoryEntryJson(out: anytype, entry: yc.memory.MemoryEntry) !void {
+    try out.writeAll("{\"key\":");
+    try writeJsonString(out, entry.key);
+    try out.writeAll(",\"category\":");
+    try writeJsonString(out, entry.category.toString());
+    try out.writeAll(",\"timestamp\":");
+    try writeJsonString(out, entry.timestamp);
+    try out.writeAll(",\"content\":");
+    try writeJsonString(out, entry.content);
+    try out.writeAll(",\"session_id\":");
+    try writeJsonNullableString(out, entry.session_id);
+    try out.writeAll("}");
 }
 
 fn printMemoryRuntimeInitFailure(allocator: std.mem.Allocator, backend: []const u8) void {
@@ -1484,8 +2129,16 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, subcmd, "reindex")) {
+        const json_mode = hasJsonFlag(sub_args[1..]);
         const count = mem_rt.reindex(allocator);
-        if (std.mem.eql(u8, mem_rt.resolved.vector_mode, "none")) {
+        const skipped = std.mem.eql(u8, mem_rt.resolved.vector_mode, "none");
+        if (json_mode) {
+            var buf: [256]u8 = undefined;
+            var bw = std_compat.fs.File.stdout().writer(&buf);
+            const out = &bw.interface;
+            out.print("{{\"reindexed\":{d},\"skipped\":{s}}}\n", .{ count, if (skipped) "true" else "false" }) catch return;
+            out.flush() catch return;
+        } else if (skipped) {
             std.debug.print("Vector plane is disabled; reindex skipped (0 entries).\n", .{});
         } else {
             std.debug.print("Reindex complete: {d} entries reindexed.\n", .{count});
@@ -1494,17 +2147,45 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, subcmd, "drain-outbox")) {
+        const json_mode = hasJsonFlag(sub_args[1..]);
         const drained = mem_rt.drainOutbox(allocator);
-        std.debug.print("Outbox drain complete: {d} operation(s) processed.\n", .{drained});
+        if (json_mode) {
+            var buf: [256]u8 = undefined;
+            var bw = std_compat.fs.File.stdout().writer(&buf);
+            const out = &bw.interface;
+            out.print("{{\"drained\":{d}}}\n", .{drained}) catch return;
+            out.flush() catch return;
+        } else {
+            std.debug.print("Outbox drain complete: {d} operation(s) processed.\n", .{drained});
+        }
         return;
     }
 
-    if (std.mem.eql(u8, subcmd, "forget")) {
+    if (std.mem.eql(u8, subcmd, "forget") or std.mem.eql(u8, subcmd, "delete")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw memory forget <key>\n", .{});
+            std.debug.print("Usage: nullclaw memory delete <key> [--session ID] [--json]\n", .{});
             std_compat.process.exit(1);
         }
         const key = sub_args[1];
+        var session_id: ?[]const u8 = null;
+        var json_mode = false;
+
+        var i: usize = 2;
+        while (i < sub_args.len) : (i += 1) {
+            if (std.mem.eql(u8, sub_args[i], "--session")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw memory delete <key> [--session ID] [--json]\n", .{});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                session_id = sub_args[i];
+            } else if (std.mem.eql(u8, sub_args[i], "--json")) {
+                json_mode = true;
+            } else {
+                std.debug.print("Unknown option for memory delete: {s}\n", .{sub_args[i]});
+                std_compat.process.exit(1);
+            }
+        }
 
         var vector_delete_scopes: std.ArrayListUnmanaged(?[]u8) = .empty;
         defer {
@@ -1514,7 +2195,7 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             vector_delete_scopes.deinit(allocator);
         }
 
-        const existing_entries = mem_rt.memory.list(allocator, null, null) catch |err| {
+        const existing_entries = mem_rt.memory.list(allocator, null, session_id) catch |err| {
             std.debug.print("memory list failed before delete: {s}\n", .{@errorName(err)});
             std_compat.process.exit(1);
         };
@@ -1542,7 +2223,7 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             }
         }
 
-        const deleted = mem_rt.memory.forget(key) catch |err| {
+        const deleted = mem_rt.memory.forgetScoped(allocator, key, session_id) catch |err| {
             std.debug.print("memory forget failed: {s}\n", .{@errorName(err)});
             std_compat.process.exit(1);
         };
@@ -1550,21 +2231,63 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             for (vector_delete_scopes.items) |sid_opt| {
                 mem_rt.deleteFromVectorStore(key, sid_opt);
             }
-            std.debug.print("Deleted memory entry: {s}\n", .{key});
+            if (json_mode) {
+                var buf: [2048]u8 = undefined;
+                var bw = std_compat.fs.File.stdout().writer(&buf);
+                const out = &bw.interface;
+                out.writeAll("{\"key\":") catch return;
+                writeJsonString(out, key) catch return;
+                out.writeAll(",\"session_id\":") catch return;
+                writeJsonNullableString(out, session_id) catch return;
+                out.writeAll(",\"deleted\":true}\n") catch return;
+                out.flush() catch return;
+            } else {
+                std.debug.print("Deleted memory entry: {s}\n", .{key});
+            }
         } else {
-            std.debug.print("Entry not deleted (missing or backend is append-only): {s}\n", .{key});
+            if (json_mode) {
+                var buf: [2048]u8 = undefined;
+                var bw = std_compat.fs.File.stdout().writer(&buf);
+                const out = &bw.interface;
+                out.writeAll("{\"key\":") catch return;
+                writeJsonString(out, key) catch return;
+                out.writeAll(",\"session_id\":") catch return;
+                writeJsonNullableString(out, session_id) catch return;
+                out.writeAll(",\"deleted\":false}\n") catch return;
+                out.flush() catch return;
+            } else {
+                std.debug.print("Entry not deleted (missing or backend is append-only): {s}\n", .{key});
+            }
         }
         return;
     }
 
     if (std.mem.eql(u8, subcmd, "get")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw memory get <key> [--json]\n", .{});
+            std.debug.print("Usage: nullclaw memory get <key> [--session ID] [--json]\n", .{});
             std_compat.process.exit(1);
         }
         const key = sub_args[1];
-        const json_mode = hasJsonFlag(sub_args[2..]);
-        const entry = mem_rt.memory.get(allocator, key) catch |err| {
+        var session_id: ?[]const u8 = null;
+        var json_mode = false;
+        var i: usize = 2;
+        while (i < sub_args.len) : (i += 1) {
+            if (std.mem.eql(u8, sub_args[i], "--session")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw memory get <key> [--session ID] [--json]\n", .{});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                session_id = sub_args[i];
+            } else if (std.mem.eql(u8, sub_args[i], "--json")) {
+                json_mode = true;
+            } else {
+                std.debug.print("Unknown option for memory get: {s}\n", .{sub_args[i]});
+                std_compat.process.exit(1);
+            }
+        }
+
+        const entry = mem_rt.memory.getScoped(allocator, key, session_id) catch |err| {
             std.debug.print("memory get failed: {s}\n", .{@errorName(err)});
             std_compat.process.exit(1);
         };
@@ -1574,17 +2297,8 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
                 var buf: [65536]u8 = undefined;
                 var bw = std_compat.fs.File.stdout().writer(&buf);
                 const out = &bw.interface;
-                out.writeAll("{\"key\":") catch return;
-                writeJsonString(out, e.key) catch return;
-                out.writeAll(",\"category\":") catch return;
-                writeJsonString(out, e.category.toString()) catch return;
-                out.writeAll(",\"timestamp\":") catch return;
-                writeJsonString(out, e.timestamp) catch return;
-                out.writeAll(",\"content\":") catch return;
-                writeJsonString(out, e.content) catch return;
-                out.writeAll(",\"session_id\":") catch return;
-                writeJsonNullableString(out, e.session_id) catch return;
-                out.writeAll("}\n") catch return;
+                writeMemoryEntryJson(out, e) catch return;
+                out.writeAll("\n") catch return;
                 out.flush() catch return;
             } else {
                 std.debug.print("key: {s}\ncategory: {s}\ntimestamp: {s}\ncontent:\n{s}\n", .{
@@ -1611,13 +2325,15 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     if (std.mem.eql(u8, subcmd, "list")) {
         var limit: usize = 20;
         var category_opt: ?yc.memory.MemoryCategory = null;
+        var session_id: ?[]const u8 = null;
+        var include_internal = false;
         var json_mode = false;
 
         var i: usize = 1;
         while (i < sub_args.len) : (i += 1) {
             if (std.mem.eql(u8, sub_args[i], "--limit")) {
                 if (i + 1 >= sub_args.len) {
-                    std.debug.print("Usage: nullclaw memory list [--category C] [--limit N] [--json]\n", .{});
+                    std.debug.print("Usage: nullclaw memory list [--category C] [--limit N] [--session ID] [--include-internal] [--json]\n", .{});
                     std_compat.process.exit(1);
                 }
                 i += 1;
@@ -1627,11 +2343,20 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
                 };
             } else if (std.mem.eql(u8, sub_args[i], "--category")) {
                 if (i + 1 >= sub_args.len) {
-                    std.debug.print("Usage: nullclaw memory list [--category C] [--limit N] [--json]\n", .{});
+                    std.debug.print("Usage: nullclaw memory list [--category C] [--limit N] [--session ID] [--include-internal] [--json]\n", .{});
                     std_compat.process.exit(1);
                 }
                 i += 1;
                 category_opt = yc.memory.MemoryCategory.fromString(sub_args[i]);
+            } else if (std.mem.eql(u8, sub_args[i], "--session")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw memory list [--category C] [--limit N] [--session ID] [--include-internal] [--json]\n", .{});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                session_id = sub_args[i];
+            } else if (std.mem.eql(u8, sub_args[i], "--include-internal")) {
+                include_internal = true;
             } else if (std.mem.eql(u8, sub_args[i], "--json")) {
                 json_mode = true;
             } else {
@@ -1640,47 +2365,50 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             }
         }
 
-        const entries = mem_rt.memory.list(allocator, category_opt, null) catch |err| {
+        const entries = mem_rt.memory.list(allocator, category_opt, session_id) catch |err| {
             std.debug.print("memory list failed: {s}\n", .{@errorName(err)});
             std_compat.process.exit(1);
         };
         defer yc.memory.freeEntries(allocator, entries);
 
-        const shown = @min(limit, entries.len);
+        var visible_total: usize = 0;
+        for (entries) |entry| {
+            if (!memoryEntryVisible(include_internal, entry)) continue;
+            visible_total += 1;
+        }
+        const shown = @min(limit, visible_total);
 
         if (json_mode) {
             var buf: [65536]u8 = undefined;
             var bw = std_compat.fs.File.stdout().writer(&buf);
             const out = &bw.interface;
             out.writeAll("[") catch return;
-            for (entries[0..shown], 0..) |e, idx| {
-                if (idx > 0) out.writeAll(",") catch return;
-                out.writeAll("{\"key\":") catch return;
-                writeJsonString(out, e.key) catch return;
-                out.writeAll(",\"category\":") catch return;
-                writeJsonString(out, e.category.toString()) catch return;
-                out.writeAll(",\"timestamp\":") catch return;
-                writeJsonString(out, e.timestamp) catch return;
-                out.writeAll(",\"content\":") catch return;
-                writeJsonString(out, e.content) catch return;
-                out.writeAll(",\"session_id\":") catch return;
-                writeJsonNullableString(out, e.session_id) catch return;
-                out.writeAll("}") catch return;
+            var written: usize = 0;
+            for (entries) |e| {
+                if (!memoryEntryVisible(include_internal, e)) continue;
+                if (written >= shown) break;
+                if (written > 0) out.writeAll(",") catch return;
+                writeMemoryEntryJson(out, e) catch return;
+                written += 1;
             }
             out.writeAll("]\n") catch return;
             out.flush() catch return;
         } else {
-            std.debug.print("Memory entries: showing {d}/{d}\n", .{ shown, entries.len });
-            for (entries[0..shown], 0..) |e, idx| {
+            std.debug.print("Memory entries: showing {d}/{d}\n", .{ shown, visible_total });
+            var written: usize = 0;
+            for (entries) |e| {
+                if (!memoryEntryVisible(include_internal, e)) continue;
+                if (written >= shown) break;
                 const preview = util.previewUtf8(e.content, 120);
                 std.debug.print("  {d}. {s} [{s}] {s}\n     {s}{s}\n", .{
-                    idx + 1,
+                    written + 1,
                     e.key,
                     e.category.toString(),
                     e.timestamp,
                     preview.slice,
                     if (preview.truncated) "..." else "",
                 });
+                written += 1;
             }
         }
         return;
@@ -1688,18 +2416,19 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
 
     if (std.mem.eql(u8, subcmd, "search")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw memory search <query> [--limit N] [--json]\n", .{});
+            std.debug.print("Usage: nullclaw memory search <query> [--limit N] [--session ID] [--json]\n", .{});
             std_compat.process.exit(1);
         }
         const query = sub_args[1];
         var limit: usize = 6;
+        var session_id: ?[]const u8 = null;
         var json_mode = false;
 
         var i: usize = 2;
         while (i < sub_args.len) : (i += 1) {
             if (std.mem.eql(u8, sub_args[i], "--limit")) {
                 if (i + 1 >= sub_args.len) {
-                    std.debug.print("Usage: nullclaw memory search <query> [--limit N] [--json]\n", .{});
+                    std.debug.print("Usage: nullclaw memory search <query> [--limit N] [--session ID] [--json]\n", .{});
                     std_compat.process.exit(1);
                 }
                 i += 1;
@@ -1707,6 +2436,13 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
                     std.debug.print("Invalid --limit value: {s}\n", .{sub_args[i]});
                     std_compat.process.exit(1);
                 };
+            } else if (std.mem.eql(u8, sub_args[i], "--session")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw memory search <query> [--limit N] [--session ID] [--json]\n", .{});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                session_id = sub_args[i];
             } else if (std.mem.eql(u8, sub_args[i], "--json")) {
                 json_mode = true;
             } else {
@@ -1715,7 +2451,7 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             }
         }
 
-        const results = mem_rt.search(allocator, query, limit, null) catch |err| {
+        const results = mem_rt.search(allocator, query, limit, session_id) catch |err| {
             std.debug.print("memory search failed: {s}\n", .{@errorName(err)});
             std_compat.process.exit(1);
         };
@@ -1761,6 +2497,91 @@ fn runMemory(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             }
         }
         return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "store") or std.mem.eql(u8, subcmd, "update")) {
+        if (sub_args.len < 3) {
+            std.debug.print("Usage: nullclaw memory {s} <key> <content> [--category C] [--session ID] [--json]\n", .{subcmd});
+            std_compat.process.exit(1);
+        }
+
+        const key = sub_args[1];
+        const content = sub_args[2];
+        var category: yc.memory.MemoryCategory = .conversation;
+        var session_id: ?[]const u8 = null;
+        var json_mode = false;
+
+        var i: usize = 3;
+        while (i < sub_args.len) : (i += 1) {
+            if (std.mem.eql(u8, sub_args[i], "--category")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw memory {s} <key> <content> [--category C] [--session ID] [--json]\n", .{subcmd});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                category = yc.memory.MemoryCategory.fromString(sub_args[i]);
+            } else if (std.mem.eql(u8, sub_args[i], "--session")) {
+                if (i + 1 >= sub_args.len) {
+                    std.debug.print("Usage: nullclaw memory {s} <key> <content> [--category C] [--session ID] [--json]\n", .{subcmd});
+                    std_compat.process.exit(1);
+                }
+                i += 1;
+                session_id = sub_args[i];
+            } else if (std.mem.eql(u8, sub_args[i], "--json")) {
+                json_mode = true;
+            } else {
+                std.debug.print("Unknown option for memory {s}: {s}\n", .{ subcmd, sub_args[i] });
+                std_compat.process.exit(1);
+            }
+        }
+
+        if (std.mem.eql(u8, subcmd, "update")) {
+            const existing = mem_rt.memory.getScoped(allocator, key, session_id) catch |err| {
+                std.debug.print("memory get failed before update: {s}\n", .{@errorName(err)});
+                std_compat.process.exit(1);
+            };
+            if (existing) |entry| {
+                entry.deinit(allocator);
+            } else {
+                if (json_mode) writeJsonError("memory_not_found", "Memory entry not found", cfg.memory.backend);
+                std.debug.print("Memory entry not found: {s}\n", .{key});
+                std_compat.process.exit(1);
+            }
+        }
+
+        mem_rt.memory.store(key, content, category, session_id) catch |err| {
+            if (json_mode) writeJsonError("memory_store_failed", @errorName(err), cfg.memory.backend);
+            std.debug.print("memory {s} failed: {s}\n", .{ subcmd, @errorName(err) });
+            std_compat.process.exit(1);
+        };
+
+        const stored = mem_rt.memory.getScoped(allocator, key, session_id) catch |err| {
+            if (json_mode) writeJsonError("memory_store_failed", @errorName(err), cfg.memory.backend);
+            std.debug.print("memory reload failed: {s}\n", .{@errorName(err)});
+            std_compat.process.exit(1);
+        };
+
+        if (stored) |entry| {
+            defer entry.deinit(allocator);
+            if (json_mode) {
+                var buf: [65536]u8 = undefined;
+                var bw = std_compat.fs.File.stdout().writer(&buf);
+                const out = &bw.interface;
+                out.writeAll("{\"action\":") catch return;
+                writeJsonString(out, if (std.mem.eql(u8, subcmd, "update")) "update" else "store") catch return;
+                out.writeAll(",\"entry\":") catch return;
+                writeMemoryEntryJson(out, entry) catch return;
+                out.writeAll("}\n") catch return;
+                out.flush() catch return;
+            } else {
+                std.debug.print("Stored memory entry: {s}\n", .{key});
+            }
+            return;
+        }
+
+        if (json_mode) writeJsonError("memory_store_failed", "Stored entry could not be re-read", cfg.memory.backend);
+        std.debug.print("Stored entry could not be re-read: {s}\n", .{key});
+        std_compat.process.exit(1);
     }
 
     std.debug.print("Unknown memory command: {s}\n\n", .{subcmd});
@@ -2340,6 +3161,10 @@ fn printConfigUsage() void {
         \\Commands:
         \\  show [--json]                  Print config.json as JSON
         \\  get <path> [--json]            Read a dotted config path
+        \\  set <path> <value> [--json]    Persist a dotted config value
+        \\  unset <path> [--json]          Remove/reset a dotted config value
+        \\  reload [--json]                Re-read config.json from disk
+        \\  validate [json] [--json]       Validate current or proposed config JSON
         \\
     , .{CONFIG_SUBCOMMANDS}), .{});
 }
@@ -2422,6 +3247,111 @@ fn runConfig(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         if (hasJsonFlag(sub_args[2..])) writeJsonError("config_path_not_found", "Config path not found", null);
         std.debug.print("Config path not found: {s}\n", .{path});
         std_compat.process.exit(1);
+    }
+
+    if (std.mem.eql(u8, subcmd, "set")) {
+        if (sub_args.len < 3 or sub_args.len > 4 or (sub_args.len == 4 and !std.mem.eql(u8, sub_args[3], "--json"))) {
+            printConfigUsage();
+            std_compat.process.exit(1);
+        }
+
+        var result = yc.config_mutator.mutateDefaultConfig(allocator, .set, sub_args[1], sub_args[2], .{ .apply = true }) catch |err| {
+            if (hasJsonFlag(sub_args[3..])) writeJsonError("config_set_failed", @errorName(err), null);
+            std.debug.print("Failed to update config path {s}: {s}\n", .{ sub_args[1], @errorName(err) });
+            std_compat.process.exit(1);
+        };
+        defer yc.config_mutator.freeMutationResult(allocator, &result);
+
+        if (hasJsonFlag(sub_args[3..])) {
+            writeConfigMutationJson(.set, &result);
+        } else {
+            std.debug.print("Updated {s}\n", .{result.path});
+            std.debug.print("  changed:          {}\n", .{result.changed});
+            std.debug.print("  applied:          {}\n", .{result.applied});
+            std.debug.print("  requires_restart: {}\n", .{result.requires_restart});
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "unset")) {
+        if (sub_args.len < 2 or sub_args.len > 3 or (sub_args.len == 3 and !std.mem.eql(u8, sub_args[2], "--json"))) {
+            printConfigUsage();
+            std_compat.process.exit(1);
+        }
+
+        var result = yc.config_mutator.mutateDefaultConfig(allocator, .unset, sub_args[1], null, .{ .apply = true }) catch |err| {
+            if (hasJsonFlag(sub_args[2..])) writeJsonError("config_unset_failed", @errorName(err), null);
+            std.debug.print("Failed to unset config path {s}: {s}\n", .{ sub_args[1], @errorName(err) });
+            std_compat.process.exit(1);
+        };
+        defer yc.config_mutator.freeMutationResult(allocator, &result);
+
+        if (hasJsonFlag(sub_args[2..])) {
+            writeConfigMutationJson(.unset, &result);
+        } else {
+            std.debug.print("Unset {s}\n", .{result.path});
+            std.debug.print("  changed:          {}\n", .{result.changed});
+            std.debug.print("  applied:          {}\n", .{result.applied});
+            std.debug.print("  requires_restart: {}\n", .{result.requires_restart});
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "reload")) {
+        if (sub_args.len > 2 or (sub_args.len == 2 and !std.mem.eql(u8, sub_args[1], "--json"))) {
+            printConfigUsage();
+            std_compat.process.exit(1);
+        }
+
+        yc.config_mutator.validateCurrentConfig(allocator) catch |err| {
+            if (hasJsonFlag(sub_args[1..])) writeJsonError("config_reload_failed", @errorName(err), null);
+            std.debug.print("Config reload validation failed: {s}\n", .{@errorName(err)});
+            std_compat.process.exit(1);
+        };
+
+        if (hasJsonFlag(sub_args[1..])) {
+            printStdoutBytes("{\"reloaded\":true,\"live_applied\":false,\"message\":\"config.json re-read from disk; restart running daemons to apply changes\"}\n");
+        } else {
+            std.debug.print("Config re-read from disk. Restart running daemons to apply changes.\n", .{});
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "validate")) {
+        var payload: ?[]const u8 = null;
+        var json_mode = false;
+        var i: usize = 1;
+        while (i < sub_args.len) : (i += 1) {
+            if (std.mem.eql(u8, sub_args[i], "--json")) {
+                json_mode = true;
+            } else if (payload == null) {
+                payload = sub_args[i];
+            } else {
+                printConfigUsage();
+                std_compat.process.exit(1);
+            }
+        }
+
+        if (payload) |candidate| {
+            yc.config_mutator.validateProposedConfigJson(allocator, candidate) catch |err| {
+                if (json_mode) writeJsonError("config_invalid", @errorName(err), null);
+                std.debug.print("Proposed config is invalid: {s}\n", .{@errorName(err)});
+                std_compat.process.exit(1);
+            };
+        } else {
+            yc.config_mutator.validateCurrentConfig(allocator) catch |err| {
+                if (json_mode) writeJsonError("config_invalid", @errorName(err), null);
+                std.debug.print("Current config is invalid: {s}\n", .{@errorName(err)});
+                std_compat.process.exit(1);
+            };
+        }
+
+        if (json_mode) {
+            printStdoutBytes("{\"valid\":true}\n");
+        } else {
+            std.debug.print("Config validation: OK\n", .{});
+        }
+        return;
     }
 
     std.debug.print("Unknown config command: {s}\n\n", .{subcmd});
@@ -2519,10 +3449,18 @@ fn runModels(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
             std.debug.print("Usage: nullclaw models info <model>\n", .{});
             std_compat.process.exit(1);
         }
-        std.debug.print("Model: {s}\n", .{sub_args[1]});
-        std.debug.print("  Default provider: {s}\n", .{yc.onboard.canonicalProviderName(sub_args[1])});
-        std.debug.print("  Context: varies by provider\n", .{});
-        std.debug.print("  Pricing: see provider dashboard\n", .{});
+        if (hasJsonFlag(sub_args[2..])) {
+            writeModelInfoJson(sub_args[1]);
+        } else {
+            std.debug.print("Model: {s}\n", .{sub_args[1]});
+            if (modelCanonicalProvider(sub_args[1])) |provider| {
+                std.debug.print("  Default provider: {s}\n", .{provider});
+            } else {
+                std.debug.print("  Default provider: unknown\n", .{});
+            }
+            std.debug.print("  Context: varies by provider\n", .{});
+            std.debug.print("  Pricing: see provider dashboard\n", .{});
+        }
     } else if (std.mem.eql(u8, subcmd, "benchmark")) {
         std.debug.print("Running model latency benchmark...\n", .{});
         std.debug.print("Configure a provider first (nullclaw onboard).\n", .{});
@@ -2532,6 +3470,86 @@ fn runModels(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         std.debug.print("Unknown models command: {s}\n", .{subcmd});
         std_compat.process.exit(1);
     }
+}
+
+fn runMcp(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    if (sub_args.len < 1) {
+        std.debug.print(std.fmt.comptimePrint(
+            \\Usage: nullclaw mcp <{s}> [args]
+            \\
+            \\Commands:
+            \\  list [--json]                List configured MCP servers
+            \\  info <name> [--json]         Show details for one MCP server
+            \\
+        , .{MCP_SUBCOMMANDS}), .{});
+        std_compat.process.exit(1);
+    }
+
+    var cfg = yc.config.Config.load(allocator) catch {
+        if (hasJsonFlag(sub_args[1..])) writeJsonError("config_not_found", "No config found -- run `nullclaw onboard` first", null);
+        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
+        std_compat.process.exit(1);
+    };
+    defer cfg.deinit();
+
+    const subcmd = sub_args[0];
+    if (std.mem.eql(u8, subcmd, "list")) {
+        if (sub_args.len > 2 or (sub_args.len == 2 and !std.mem.eql(u8, sub_args[1], "--json"))) {
+            std.debug.print("Usage: nullclaw mcp list [--json]\n", .{});
+            std_compat.process.exit(1);
+        }
+        if (hasJsonFlag(sub_args[1..])) {
+            const body = yc.mcp_admin.buildServersJson(allocator, cfg.mcp_servers) catch |err| {
+                writeJsonError("mcp_list_failed", @errorName(err), null);
+                std_compat.process.exit(1);
+            };
+            defer allocator.free(body);
+            printStdoutBytes(body);
+            printStdoutBytes("\n");
+            return;
+        }
+
+        if (cfg.mcp_servers.len == 0) {
+            std.debug.print("No MCP servers configured.\n", .{});
+            return;
+        }
+
+        std.debug.print("Configured MCP servers:\n", .{});
+        for (cfg.mcp_servers) |server| {
+            std.debug.print("  - {s} [{s}] {s}\n", .{ server.name, server.transport, server.command });
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "info")) {
+        if (sub_args.len < 2 or sub_args.len > 3 or (sub_args.len == 3 and !std.mem.eql(u8, sub_args[2], "--json"))) {
+            std.debug.print("Usage: nullclaw mcp info <name> [--json]\n", .{});
+            std_compat.process.exit(1);
+        }
+
+        const server_json = yc.mcp_admin.buildServerJson(allocator, cfg.mcp_servers, sub_args[1]) catch |err| {
+            if (hasJsonFlag(sub_args[2..])) writeJsonError("mcp_info_failed", @errorName(err), null);
+            std.debug.print("Failed to inspect MCP server: {s}\n", .{@errorName(err)});
+            std_compat.process.exit(1);
+        };
+        if (server_json) |body| {
+            defer allocator.free(body);
+            if (hasJsonFlag(sub_args[2..])) {
+                printStdoutBytes(body);
+                printStdoutBytes("\n");
+            } else {
+                std.debug.print("{s}\n", .{body});
+            }
+            return;
+        }
+
+        if (hasJsonFlag(sub_args[2..])) writeJsonError("mcp_not_found", "MCP server not found", null);
+        std.debug.print("MCP server not found: {s}\n", .{sub_args[1]});
+        std_compat.process.exit(1);
+    }
+
+    std.debug.print("Unknown mcp command: {s}\n", .{subcmd});
+    std_compat.process.exit(1);
 }
 
 // ── Onboard ──────────────────────────────────────────────────────

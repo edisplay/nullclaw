@@ -338,6 +338,15 @@ fn validateCandidateJson(allocator: std.mem.Allocator, config_path: []const u8, 
     try cfg.validate();
 }
 
+pub fn validateProposedConfigJson(allocator: std.mem.Allocator, content: []const u8) !void {
+    const config_path = try defaultConfigPath(allocator);
+    defer allocator.free(config_path);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    try validateCandidateJson(arena.allocator(), config_path, content);
+}
+
 pub fn getCurrentConfigJson(allocator: std.mem.Allocator) ![]u8 {
     const config_path = try defaultConfigPath(allocator);
     defer allocator.free(config_path);
